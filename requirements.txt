@@ -1,0 +1,4 @@
+pyTigerGraph>=2.0.4
+python-dotenv>=1.0.0
+numpy>=2.0.0
+fastembed>=0.4.0

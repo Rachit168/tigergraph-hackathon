@@ -1,0 +1,146 @@
+// OlympicGraph schema for the TigerGraph Agentic GraphRAG hackathon Phase 4.
+// Smallest practical typed graph for the Phase 2 structured query contract.
+// No Athlete/Nation vertices: medal names stay raw strings.
+// No PREV_EVENT edges: prev_year is an Event attribute; same-name match is query-time.
+
+USE GLOBAL
+
+CREATE VERTEX Document (
+  PRIMARY_ID id STRING,
+  title STRING,
+  url STRING,
+  wikidata_qid STRING,
+  wikipedia_pageid INT,
+  approx_tokens INT,
+  has_olympic_infobox BOOL,
+  kind STRING,
+  rejection_reason STRING,
+  is_event BOOL,
+  event_id STRING
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX Chunk (
+  PRIMARY_ID id STRING,
+  document_id STRING,
+  document_title STRING,
+  source_url STRING,
+  text STRING,
+  indexed_text STRING,
+  start_char INT,
+  end_char INT,
+  token_count INT,
+  chunk_index INT,
+  section STRING,
+  kind STRING,
+  event_id STRING,
+  document_kind STRING,
+  embedding_status STRING
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX Event (
+  PRIMARY_ID id STRING,
+  document_id STRING,
+  title STRING,
+  title_folded STRING,
+  sport STRING,
+  sport_raw STRING,
+  event_name_raw STRING,
+  event_name_folded STRING,
+  event_name_normalized STRING,
+  event_name_core STRING,
+  event_name_gender STRING,
+  infobox_event STRING,
+  year INT,
+  season STRING,
+  games_id STRING,
+  infobox_games_raw STRING,
+  year_source STRING,
+  venue_raw STRING,
+  venue_key STRING,
+  venue_compact STRING,
+  venue_tokens STRING,
+  date_raw STRING,
+  date_years STRING,
+  date_months STRING,
+  date_days STRING,
+  date_compact STRING,
+  competitors INT,
+  has_competitors BOOL,
+  competitors_raw STRING,
+  nations INT,
+  has_nations BOOL,
+  nations_raw STRING,
+  gold_raw STRING,
+  gold_noc STRING,
+  silver_raw STRING,
+  bronze_raw STRING,
+  has_gold BOOL,
+  prev_year INT,
+  next_year INT,
+  prev_year_raw STRING,
+  next_year_raw STRING,
+  flags STRING,
+  url STRING,
+  competitors_overflow BOOL
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX Games (
+  PRIMARY_ID id STRING,
+  year INT,
+  season STRING
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX Sport (
+  PRIMARY_ID id STRING,
+  name STRING
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX Venue (
+  PRIMARY_ID id STRING,
+  name STRING,
+  compact STRING,
+  tokens STRING
+) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE DIRECTED EDGE CONTAINS_CHUNK (
+  FROM Document, TO Chunk,
+  document_id STRING,
+  source_chunk_id STRING,
+  chunk_index INT,
+  section STRING
+)
+
+CREATE DIRECTED EDGE DESCRIBES (
+  FROM Document, TO Event,
+  document_id STRING,
+  source_chunk_id STRING
+)
+
+CREATE DIRECTED EDGE IN_GAMES (
+  FROM Event, TO Games,
+  document_id STRING,
+  source_chunk_id STRING,
+  year INT,
+  season STRING
+)
+
+CREATE DIRECTED EDGE OF_SPORT (
+  FROM Event, TO Sport,
+  document_id STRING,
+  source_chunk_id STRING,
+  sport_raw STRING
+)
+
+CREATE DIRECTED EDGE HELD_AT (
+  FROM Event, TO Venue,
+  document_id STRING,
+  source_chunk_id STRING,
+  venue_raw STRING
+)
+
+// Fresh database only. If Savanna already created OlympicGraph(), this CREATE GRAPH
+// will not bind types; use gsql/03_bind_graph.gsql (--bind) instead of re-running this file.
+CREATE GRAPH OlympicGraph (
+  Document, Chunk, Event, Games, Sport, Venue,
+  CONTAINS_CHUNK, DESCRIBES, IN_GAMES, OF_SPORT, HELD_AT
+)

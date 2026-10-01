@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OlympicGraph · Investigation Console</title>
+  <link rel="stylesheet" href="/console.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">OG</span>
+      <div>
+        <h1>OlympicGraph Investigation Console</h1>
+        <p>Ask → retrieve → inspect evidence → compare pipelines</p>
+      </div>
+    </div>
+    <div class="top-meta" id="top-caps"></div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="investigate">Investigate</button>
+    <button class="tab" data-view="compare">Compare</button>
+    <button class="tab" data-view="benchmark">Benchmark</button>
+    <button class="tab" data-view="system">System</button>
+    <button class="tab" data-view="history">History</button>
+    <button class="tab" data-view="reports">Reports</button>
+  </nav>
+
+  <main>
+    <section id="view-investigate" class="view active">
+      <div class="workspace">
+        <section class="panel hero">
+          <div class="panel-h">
+            <h2>Question</h2>
+            <div class="row tight">
+              <span id="runtime-mode" class="chip mute">—</span>
+              <span id="run-state" class="chip mute">Idle</span>
+              <span id="elapsed" class="chip mute">0.0s</span>
+            </div>
+          </div>
+          <textarea id="question-input" rows="3" placeholder="Ask a question against the Olympic event corpus…"></textarea>
+          <p class="hint example" id="example-placeholder"></p>
+          <div class="row actions">
+            <fieldset class="pipes" id="pipeline-select">
+              <legend>Pipeline</legend>
+              <label><input type="radio" name="pipeline" value="rag" /> RAG</label>
+              <label><input type="radio" name="pipeline" value="graphrag" /> GraphRAG</label>
+              <label><input type="radio" name="pipeline" value="agentic_graphrag" checked /> Agentic GraphRAG</label>
+              <label><input type="radio" name="pipeline" value="compare" /> Compare All</label>
+            </fieldset>
+            <button id="run-btn" class="primary" type="button">Run</button>
+            <button id="cancel-btn" class="ghost" type="button" disabled>Stop</button>
+            <button id="clear-btn" class="ghost" type="button">Clear</button>
+          </div>
+          <p id="run-banner" class="banner mute hidden"></p>
+        </section>
+
+        <section class="result-grid">
+          <article class="panel answer-panel">
+            <div class="panel-h">
+              <h2>Answer</h2>
+              <span id="answer-status" class="chip">—</span>
+            </div>
+            <p id="asked-question" class="asked"></p>
+            <p id="answer-text" class="answer">Enter a question and run an investigation.</p>
+            <div id="citations" class="citations"></div>
+            <div id="evidence-status" class="status-row"></div>
+            <div class="why-grid">
+              <div class="stop-box">
+                <h3>Why did it continue?</h3>
+                <p id="continue-reason">—</p>
+              </div>
+              <div class="stop-box">
+                <h3>Why did it stop?</h3>
+                <p id="stop-reason">—</p>
+              </div>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-h">
+              <h2>Efficiency</h2>
+              <span class="chip mute">Observed</span>
+            </div>
+            <div id="efficiency" class="metric-tiles"></div>
+            <div class="panel-h tight-top"><h2>Reliability</h2></div>
+            <div id="reliability" class="metric-tiles"></div>
+          </article>
+        </section>
+
+        <section class="split">
+          <article class="panel">
+            <div class="panel-h">
+              <h2>Investigation trace</h2>
+              <span id="step-count" class="chip mute">0 steps</span>
+            </div>
+            <ol id="timeline" class="timeline"><li>Run an investigation to see observed steps.</li></ol>
+          </article>
+          <article class="panel">
+            <div class="panel-h"><h2>Evidence diff</h2></div>
+            <div id="evidence-diff" class="diff"><p class="hint">Agentic investigations show what each tool call added.</p></div>
+          </article>
+        </section>
+
+        <section class="split">
+          <article class="panel graph-panel">
+            <div class="panel-h">
+              <h2>Graph context</h2>
+              <div class="row tight">
+                <button type="button" id="graph-reset" class="ghost">Reset view</button>
+                <span class="hint">Scroll to zoom · drag to pan</span>
+              </div>
+            </div>
+            <div class="graph-frame">
+              <svg id="graph" viewBox="0 0 920 520" role="img" aria-label="Retrieved evidence graph"></svg>
+            </div>
+            <p id="graph-note" class="hint"></p>
+            <div class="legend" id="graph-legend"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-h"><h2>Evidence lineage</h2></div>
+            <div id="lineage" class="lineage"><p class="hint">Citations expand to chunk, document, and graph identifiers.</p></div>
+          </article>
+        </section>
+      </div>
+    </section>
+
+    <section id="view-compare" class="view" hidden>
+      <section class="panel">
+        <div class="panel-h"><h2>Compare all</h2></div>
+        <p class="hint">The same question is executed through RAG, Fixed GraphRAG, and Agentic GraphRAG. No overall winner is assigned.</p>
+        <div class="table-wrap" id="compare-table"></div>
+        <div id="what-changed" class="changed"></div>
+        <div id="fixed-vs-agentic" class="vs-grid"></div>
+      </section>
+    </section>
+
+    <section id="view-benchmark" class="view" hidden>
+      <p class="canon-label" id="canon-label"></p>
+      <div id="headline-cards" class="cards"></div>
+      <div id="metric-table" class="panel table-wrap"></div>
+      <div class="chart-grid">
+        <article class="panel"><h2>Accuracy</h2><div id="chart-correctness"></div></article>
+        <article class="panel"><h2>Question-family analysis</h2><div id="chart-family"></div></article>
+        <article class="panel"><h2>Token usage</h2><div id="chart-tokens"></div></article>
+        <article class="panel"><h2>Latency</h2><div id="chart-latency"></div></article>
+        <article class="panel wide"><h2>Agentic tool-call behavior</h2><div id="chart-agent"></div></article>
+      </div>
+    </section>
+
+    <section id="view-system" class="view" hidden>
+      <div class="sys-grid">
+        <article class="panel">
+          <div class="panel-h">
+            <h2>Health</h2>
+            <span id="health-overall" class="pill mute">Read-only</span>
+          </div>
+          <div id="health-checks" class="checks"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-h"><h2>Production routing</h2></div>
+          <svg id="arch-svg" viewBox="0 0 640 420" class="arch"></svg>
+          <ul id="arch-notes" class="notes"></ul>
+        </article>
+        <article class="panel wide">
+          <div class="panel-h"><h2>Why Agentic?</h2></div>
+          <p id="why-disclaimer" class="hint"></p>
+          <ol id="why-rules" class="why"></ol>
+        </article>
+        <article class="panel">
+          <div class="panel-h"><h2>TigerGraph vector</h2></div>
+          <p class="banner mute">Verified infrastructure / experiment capability. Not the production RAG retriever.</p>
+          <dl id="vector-status" class="metrics stacked"></dl>
+          <div id="vector-exp"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="view-history" class="view" hidden>
+      <section class="panel">
+        <div class="panel-h">
+          <h2>Session history</h2>
+          <button id="history-clear" class="ghost" type="button">Clear session</button>
+        </div>
+        <p class="hint">Stored in this browser tab only. Opening a row replays the investigation.</p>
+        <div id="history-list" class="history"></div>
+      </section>
+    </section>
+
+    <section id="view-reports" class="view" hidden>
+      <section class="panel">
+        <div class="panel-h"><h2>Export / report</h2></div>
+        <p class="hint">Exports use the public-safe trace schema. Evaluator scoring fields are never included.</p>
+        <div class="row actions">
+          <button id="copy-btn" class="ghost" type="button">Copy investigation JSON</button>
+          <button id="download-btn" class="primary" type="button">Export investigation</button>
+          <button id="copy-compare-btn" class="ghost" type="button">Copy comparison JSON</button>
+          <button id="download-compare-btn" class="ghost" type="button">Export comparison</button>
+        </div>
+        <pre id="report-preview" class="ascii">Run an investigation to preview a sanitized report.</pre>
+      </section>
+    </section>
+  </main>
+  <script src="/console.js"></script>
+</body>
+</html>

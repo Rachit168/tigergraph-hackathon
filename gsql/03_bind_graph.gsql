@@ -1,0 +1,16 @@
+// Attach existing GLOBAL vertex/edge types to the already-created OlympicGraph.
+// Use this when Savanna pre-created an empty graph domain: OlympicGraph().
+// Does not DROP GRAPH, CREATE GRAPH, or redefine type attributes.
+// Fresh databases should still use 00_schema.gsql (CREATE GRAPH with a type list).
+
+USE GLOBAL
+
+DROP JOB bind_olympicgraph_types
+
+CREATE GLOBAL SCHEMA_CHANGE JOB bind_olympicgraph_types {
+  ADD VERTEX Document, Chunk, Event, Games, Sport, Venue TO GRAPH OlympicGraph;
+  ADD EDGE CONTAINS_CHUNK, DESCRIBES, IN_GAMES, OF_SPORT, HELD_AT TO GRAPH OlympicGraph;
+}
+
+RUN GLOBAL SCHEMA_CHANGE JOB bind_olympicgraph_types
+DROP JOB bind_olympicgraph_types

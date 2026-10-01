@@ -1,0 +1,126 @@
+// Phase 5 GraphRAG retrieval helpers. Does not replace 02_queries.gsql.
+// Typed hops only: DESCRIBES, CONTAINS_CHUNK, IN_GAMES, OF_SPORT, HELD_AT.
+// event_ids is a packed "|id|id|" string so substring collisions cannot match.
+
+USE GRAPH OlympicGraph
+
+CREATE OR REPLACE QUERY chunks_for_events(STRING event_ids, INT max_extra) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@chunk_ids;
+  ListAccum<STRING> @@document_ids;
+  ListAccum<STRING> @@event_ids_out;
+  ListAccum<STRING> @@texts;
+  ListAccum<STRING> @@kinds;
+  ListAccum<STRING> @@sections;
+  ListAccum<INT> @@indexes;
+  ListAccum<STRING> @@urls;
+  ListAccum<INT> @@start_chars;
+  ListAccum<INT> @@end_chars;
+  SumAccum<INT> @@hit_count;
+  SumAccum<INT> @@extra_kept;
+  seed = {Document.*};
+
+  docs = SELECT d FROM seed:d - (DESCRIBES:e) -> Event:t
+    WHERE event_ids != "" AND event_ids LIKE "%|" + t.id + "|%";
+
+  infobox = SELECT c FROM docs:d - (CONTAINS_CHUNK:e2) -> Chunk:c
+    WHERE c.kind == "infobox"
+    ACCUM
+      @@chunk_ids += c.id,
+      @@document_ids += c.document_id,
+      @@event_ids_out += c.event_id,
+      @@texts += c.text,
+      @@kinds += c.kind,
+      @@sections += c.section,
+      @@indexes += c.chunk_index,
+      @@urls += c.source_url,
+      @@start_chars += c.start_char,
+      @@end_chars += c.end_char,
+      @@hit_count += 1;
+
+  extras = SELECT c FROM docs:d - (CONTAINS_CHUNK:e3) -> Chunk:c
+    WHERE max_extra > 0 AND c.kind != "infobox"
+    ACCUM
+      IF @@extra_kept < max_extra THEN
+        @@chunk_ids += c.id,
+        @@document_ids += c.document_id,
+        @@event_ids_out += c.event_id,
+        @@texts += c.text,
+        @@kinds += c.kind,
+        @@sections += c.section,
+        @@indexes += c.chunk_index,
+        @@urls += c.source_url,
+        @@start_chars += c.start_char,
+        @@end_chars += c.end_char,
+        @@hit_count += 1,
+        @@extra_kept += 1
+      END;
+
+  PRINT @@chunk_ids AS chunk_ids, @@document_ids AS document_ids,
+        @@event_ids_out AS event_ids, @@texts AS texts, @@kinds AS kinds,
+        @@sections AS sections, @@indexes AS indexes, @@urls AS urls,
+        @@start_chars AS start_chars, @@end_chars AS end_chars,
+        @@hit_count AS hit_count, @@extra_kept AS extra_kept;
+}
+
+CREATE OR REPLACE QUERY event_neighborhood(STRING event_id) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@event_ids;
+  ListAccum<STRING> @@titles;
+  ListAccum<STRING> @@document_ids;
+  ListAccum<STRING> @@gold;
+  ListAccum<INT> @@nations;
+  ListAccum<INT> @@competitors;
+  ListAccum<STRING> @@games_ids;
+  ListAccum<STRING> @@sport_ids;
+  ListAccum<STRING> @@venue_ids;
+  ListAccum<STRING> @@chunk_ids;
+  ListAccum<STRING> @@chunk_document_ids;
+  ListAccum<STRING> @@chunk_event_ids;
+  ListAccum<STRING> @@texts;
+  ListAccum<STRING> @@kinds;
+  ListAccum<STRING> @@sections;
+  ListAccum<INT> @@indexes;
+  ListAccum<STRING> @@urls;
+  seed = {Event.*};
+  documents = {Document.*};
+
+  games = SELECT g FROM seed:e - (IN_GAMES:rel) -> Games:g
+    WHERE e.id == event_id
+    ACCUM
+      @@event_ids += e.id,
+      @@titles += e.title,
+      @@document_ids += e.document_id,
+      @@gold += e.gold_raw,
+      @@nations += e.nations,
+      @@competitors += e.competitors,
+      @@games_ids += g.id;
+
+  sports = SELECT s FROM seed:e - (OF_SPORT:rel) -> Sport:s
+    WHERE e.id == event_id
+    ACCUM @@sport_ids += s.id;
+
+  venues = SELECT v FROM seed:e - (HELD_AT:rel) -> Venue:v
+    WHERE e.id == event_id
+    ACCUM @@venue_ids += v.id;
+
+  docs = SELECT d FROM documents:d - (DESCRIBES:rel2) -> Event:t
+    WHERE t.id == event_id;
+
+  chunks = SELECT c FROM docs:d - (CONTAINS_CHUNK:rel3) -> Chunk:c
+    WHERE c.kind == "infobox"
+    ACCUM
+      @@chunk_ids += c.id,
+      @@chunk_document_ids += c.document_id,
+      @@chunk_event_ids += c.event_id,
+      @@texts += c.text,
+      @@kinds += c.kind,
+      @@sections += c.section,
+      @@indexes += c.chunk_index,
+      @@urls += c.source_url;
+
+  PRINT @@event_ids AS event_ids, @@titles AS titles, @@document_ids AS document_ids,
+        @@gold AS gold, @@nations AS nations, @@competitors AS competitors,
+        @@games_ids AS games_ids, @@sport_ids AS sport_ids, @@venue_ids AS venue_ids,
+        @@chunk_ids AS chunk_ids, @@chunk_document_ids AS chunk_document_ids,
+        @@chunk_event_ids AS chunk_event_ids, @@texts AS texts, @@kinds AS kinds,
+        @@sections AS sections, @@indexes AS indexes, @@urls AS urls;
+}

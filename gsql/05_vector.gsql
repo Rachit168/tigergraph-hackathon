@@ -1,0 +1,18 @@
+// Additive TigerVector schema + search query for OlympicGraph Chunk vertices.
+// Does not replace GraphRAG installed queries. VECTOR ATTRIBUTE is not a STRING column.
+
+USE GLOBAL
+CREATE GLOBAL SCHEMA_CHANGE JOB add_chunk_embedding_v1 {
+  ALTER VERTEX Chunk ADD VECTOR ATTRIBUTE embedding(DIMENSION=384, METRIC="COSINE", INDEXTYPE="HNSW", DATATYPE="FLOAT");
+}
+RUN GLOBAL SCHEMA_CHANGE JOB add_chunk_embedding_v1
+DROP JOB add_chunk_embedding_v1
+
+USE GRAPH OlympicGraph
+CREATE OR REPLACE QUERY search_chunk_embedding(LIST<FLOAT> query_vec, INT k) FOR GRAPH OlympicGraph SYNTAX v3 {
+  MapAccum<VERTEX, FLOAT> @@distances;
+  v = vectorSearch({Chunk.embedding}, query_vec, k, {distance_map: @@distances});
+  PRINT v;
+  PRINT @@distances AS distances;
+}
+INSTALL QUERY search_chunk_embedding

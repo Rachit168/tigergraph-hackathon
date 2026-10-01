@@ -1,0 +1,377 @@
+USE GRAPH OlympicGraph
+
+CREATE OR REPLACE QUERY lookup_event(STRING title, STRING title_folded) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@event_ids;
+  ListAccum<STRING> @@titles;
+  ListAccum<INT> @@nations;
+  ListAccum<BOOL> @@has_nations;
+  ListAccum<STRING> @@gold;
+  SumAccum<INT> @@exact_n;
+  seed = {Event.*};
+
+  exact = SELECT s FROM seed:s
+    WHERE s.title == title
+    ACCUM @@exact_n += 1;
+
+  hits = SELECT s FROM seed:s
+    WHERE s.title == title
+       OR (@@exact_n == 0 AND title_folded != "" AND s.title_folded == title_folded)
+    ACCUM
+      @@event_ids += s.id,
+      @@titles += s.title,
+      @@nations += s.nations,
+      @@has_nations += s.has_nations,
+      @@gold += s.gold_raw;
+
+  PRINT @@event_ids AS event_ids, @@titles AS titles, @@nations AS nations,
+        @@has_nations AS has_nations, @@gold AS gold;
+}
+
+CREATE OR REPLACE QUERY count_over_threshold(STRING sport, INT year, STRING season, INT threshold) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@event_ids;
+  SumAccum<INT> @@pool_size;
+  SumAccum<INT> @@usable;
+  SumAccum<INT> @@missing;
+  seed = {Event.*};
+
+  pool = SELECT s FROM seed:s
+    WHERE s.sport == sport AND s.year == year AND s.season == season
+    ACCUM @@pool_size += 1
+    POST-ACCUM
+      IF s.has_competitors THEN
+        @@usable += 1
+      ELSE
+        @@missing += 1
+      END;
+
+  hits = SELECT s FROM pool:s
+    WHERE s.has_competitors AND s.competitors > threshold
+    ACCUM @@event_ids += s.id;
+
+  PRINT @@event_ids AS event_ids, @@event_ids.size() AS hit_count,
+        @@pool_size AS pool_size, @@usable AS usable_with_competitors,
+        @@missing AS missing_competitors;
+}
+
+CREATE OR REPLACE QUERY argmax_competitors(STRING sport, INT year, STRING season) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@event_ids;
+  ListAccum<STRING> @@titles;
+  ListAccum<INT> @@competitors;
+  SumAccum<INT> @@usable;
+  SumAccum<INT> @@pool_size;
+  MaxAccum<INT> @@best;
+  seed = {Event.*};
+
+  pool = SELECT s FROM seed:s
+    WHERE s.sport == sport AND s.year == year AND s.season == season
+    ACCUM @@pool_size += 1
+    POST-ACCUM
+      IF s.has_competitors THEN
+        @@usable += 1,
+        @@best += s.competitors
+      END;
+
+  winners = SELECT s FROM pool:s
+    WHERE @@usable > 0 AND s.has_competitors AND s.competitors == @@best
+    ACCUM
+      @@event_ids += s.id,
+      @@titles += s.title,
+      @@competitors += s.competitors;
+
+  PRINT @@event_ids AS event_ids, @@titles AS titles, @@competitors AS competitors,
+        @@best AS max_competitors, @@usable AS usable_with_competitors,
+        @@pool_size AS pool_size;
+}
+
+CREATE OR REPLACE QUERY previous_event_gold(
+  STRING sport,
+  INT named_year,
+  STRING season,
+  STRING event_name_folded,
+  STRING event_name_normalized,
+  STRING event_name_core,
+  STRING event_name_gender,
+  STRING relation
+) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@named_ids;
+  ListAccum<STRING> @@event_ids;
+  ListAccum<STRING> @@gold;
+  ListAccum<STRING> @@titles;
+  STRING year_source = "calendar";
+  INT target_year = 0;
+  INT infobox_year = 0;
+  STRING used_sport = sport;
+  STRING used_season = season;
+  STRING used_folded = event_name_folded;
+  STRING used_normalized = event_name_normalized;
+  STRING used_core = event_name_core;
+  STRING used_gender = event_name_gender;
+  INT calendar_year = 0;
+  SetAccum<VERTEX<Event>> @@named_acc;
+  seed = {Event.*};
+
+  named_identity = SELECT s FROM seed:s
+    WHERE s.sport == sport AND s.year == named_year AND s.season == season
+      AND event_name_folded != "" AND s.event_name_folded == event_name_folded;
+
+  named_fuzzy = SELECT s FROM seed:s
+    WHERE s.sport == sport AND s.year == named_year AND s.season == season
+      AND (
+        (event_name_normalized != "" AND s.event_name_normalized == event_name_normalized)
+        OR (
+          event_name_core != "" AND s.event_name_core == event_name_core
+          AND (event_name_gender == "" OR s.event_name_gender == "" OR s.event_name_gender == event_name_gender)
+        )
+      );
+
+  named = SELECT s FROM named_identity:s;
+  IF named_identity.size() == 0 THEN
+    named = SELECT s FROM named_fuzzy:s;
+  END;
+  acc = SELECT s FROM named:s ACCUM @@named_acc += s;
+
+  FOREACH v IN @@named_acc DO
+    @@named_ids += v.id;
+    IF relation == "next" THEN
+      infobox_year = v.next_year;
+    ELSE
+      infobox_year = v.prev_year;
+    END;
+    used_sport = v.sport;
+    used_season = v.season;
+    used_folded = v.event_name_folded;
+    used_normalized = v.event_name_normalized;
+    used_core = v.event_name_core;
+    used_gender = v.event_name_gender;
+  END;
+
+  IF season == "Summer" THEN
+    IF relation == "next" THEN
+      calendar_year = named_year + 4;
+    ELSE
+      calendar_year = named_year - 4;
+    END;
+  ELSE IF season == "Winter" THEN
+    IF relation == "next" THEN
+      IF named_year == 1992 THEN
+        calendar_year = 1994;
+      ELSE
+        calendar_year = named_year + 4;
+      END;
+    ELSE
+      IF named_year == 1994 THEN
+        calendar_year = 1992;
+      ELSE IF named_year == 1992 THEN
+        calendar_year = 1988;
+      ELSE
+        calendar_year = named_year - 4;
+      END;
+    END;
+  END;
+
+  IF infobox_year != 0 THEN
+    target_year = infobox_year;
+    year_source = "infobox";
+  ELSE
+    target_year = calendar_year;
+    year_source = "calendar";
+  END;
+
+  related = SELECT s FROM seed:s WHERE s.id == "";
+
+  IF named.size() <= 1 AND target_year != 0 THEN
+    related_identity = SELECT s FROM seed:s
+      WHERE s.sport == used_sport AND s.year == target_year AND s.season == used_season
+        AND used_folded != "" AND s.event_name_folded == used_folded;
+
+    related_fuzzy = SELECT s FROM seed:s
+      WHERE s.sport == used_sport AND s.year == target_year AND s.season == used_season
+        AND (
+          (used_normalized != "" AND s.event_name_normalized == used_normalized)
+          OR (
+            used_core != "" AND s.event_name_core == used_core
+            AND (used_gender == "" OR s.event_name_gender == "" OR s.event_name_gender == used_gender)
+          )
+        );
+
+    related = SELECT s FROM related_identity:s;
+    IF related_identity.size() == 0 THEN
+      related = SELECT s FROM related_fuzzy:s;
+    END;
+
+    IF related.size() == 0 THEN
+      related_identity = SELECT s FROM seed:s
+        WHERE s.sport == sport AND s.year == target_year AND s.season == season
+          AND event_name_folded != "" AND s.event_name_folded == event_name_folded;
+      related_fuzzy = SELECT s FROM seed:s
+        WHERE s.sport == sport AND s.year == target_year AND s.season == season
+          AND (
+            (event_name_normalized != "" AND s.event_name_normalized == event_name_normalized)
+            OR (
+              event_name_core != "" AND s.event_name_core == event_name_core
+              AND (event_name_gender == "" OR s.event_name_gender == "" OR s.event_name_gender == event_name_gender)
+            )
+          );
+      related = SELECT s FROM related_identity:s;
+      IF related_identity.size() == 0 THEN
+        related = SELECT s FROM related_fuzzy:s;
+      END;
+    END;
+  END;
+
+  result = SELECT s FROM related:s
+    ACCUM
+      @@event_ids += s.id,
+      @@gold += s.gold_raw,
+      @@titles += s.title;
+
+  PRINT @@named_ids AS named_ids, @@event_ids AS event_ids, @@gold AS gold, @@titles AS titles,
+        target_year AS target_year, year_source AS year_source,
+        named.size() AS named_year_hits, related.size() AS related_hits;
+}
+
+CREATE OR REPLACE QUERY events_at_venue_date(
+  INT year,
+  STRING season,
+  STRING venue_compact,
+  STRING tok1,
+  STRING tok2,
+  STRING tok3,
+  STRING tok4,
+  STRING tok5,
+  STRING tok6,
+  STRING tok7,
+  STRING tok8,
+  STRING q_years,
+  STRING q_months,
+  STRING q_days
+) FOR GRAPH OlympicGraph {
+  ListAccum<STRING> @@event_ids;
+  ListAccum<STRING> @@titles;
+  ListAccum<STRING> @@gold;
+  ListAccum<STRING> @@date_raw;
+  ListAccum<STRING> @@date_years;
+  ListAccum<STRING> @@date_months;
+  ListAccum<STRING> @@date_days;
+  ListAccum<STRING> @@date_compact;
+  ListAccum<INT> @@venue_scores;
+  SumAccum<INT> @score;
+  MaxAccum<INT> @@best;
+  SetAccum<VERTEX> @@venue_hits;
+  seed = {Event.*};
+
+  scored = SELECT s FROM seed:s
+    WHERE (year == 0 OR s.year == year) AND (season == "" OR s.season == "" OR s.season == season)
+    ACCUM
+      IF venue_compact != "" AND s.venue_compact != "" AND s.venue_compact == venue_compact THEN
+        s.@score += 100
+      ELSE IF venue_compact != "" AND s.venue_compact != "" AND replace(s.venue_compact, venue_compact, "") != s.venue_compact THEN
+        s.@score += 70
+      ELSE IF venue_compact != "" AND s.venue_compact != "" AND replace(venue_compact, s.venue_compact, "") != venue_compact THEN
+        s.@score += 60
+      ELSE IF tok1 != ""
+          AND (tok1 == "" OR replace(" " + s.venue_tokens + " ", " " + tok1 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok2 == "" OR replace(" " + s.venue_tokens + " ", " " + tok2 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok3 == "" OR replace(" " + s.venue_tokens + " ", " " + tok3 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok4 == "" OR replace(" " + s.venue_tokens + " ", " " + tok4 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok5 == "" OR replace(" " + s.venue_tokens + " ", " " + tok5 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok6 == "" OR replace(" " + s.venue_tokens + " ", " " + tok6 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok7 == "" OR replace(" " + s.venue_tokens + " ", " " + tok7 + " ", "") != " " + s.venue_tokens + " ")
+          AND (tok8 == "" OR replace(" " + s.venue_tokens + " ", " " + tok8 + " ", "") != " " + s.venue_tokens + " ") THEN
+        s.@score += 40
+      END
+    POST-ACCUM @@best += s.@score;
+
+  venue_hits = SELECT s FROM scored:s
+    WHERE s.@score > 0 AND s.@score == @@best
+    ACCUM @@venue_hits += s;
+
+  overlapping = SELECT s FROM venue_hits:s
+    WHERE
+      (q_years == "" OR s.date_years == "" OR replace(s.date_years, q_years, "") != s.date_years OR replace(q_years, s.date_years, "") != q_years
+        OR (replace(q_years, "|1980|", "") != q_years AND replace(s.date_years, "|1980|", "") != s.date_years)
+        OR (replace(q_years, "|1984|", "") != q_years AND replace(s.date_years, "|1984|", "") != s.date_years)
+        OR (replace(q_years, "|1988|", "") != q_years AND replace(s.date_years, "|1988|", "") != s.date_years)
+        OR (replace(q_years, "|1992|", "") != q_years AND replace(s.date_years, "|1992|", "") != s.date_years)
+        OR (replace(q_years, "|1994|", "") != q_years AND replace(s.date_years, "|1994|", "") != s.date_years)
+        OR (replace(q_years, "|1996|", "") != q_years AND replace(s.date_years, "|1996|", "") != s.date_years)
+        OR (replace(q_years, "|1998|", "") != q_years AND replace(s.date_years, "|1998|", "") != s.date_years)
+        OR (replace(q_years, "|2000|", "") != q_years AND replace(s.date_years, "|2000|", "") != s.date_years)
+        OR (replace(q_years, "|2002|", "") != q_years AND replace(s.date_years, "|2002|", "") != s.date_years)
+        OR (replace(q_years, "|2004|", "") != q_years AND replace(s.date_years, "|2004|", "") != s.date_years)
+        OR (replace(q_years, "|2006|", "") != q_years AND replace(s.date_years, "|2006|", "") != s.date_years)
+        OR (replace(q_years, "|2008|", "") != q_years AND replace(s.date_years, "|2008|", "") != s.date_years)
+        OR (replace(q_years, "|2010|", "") != q_years AND replace(s.date_years, "|2010|", "") != s.date_years)
+        OR (replace(q_years, "|2012|", "") != q_years AND replace(s.date_years, "|2012|", "") != s.date_years)
+        OR (replace(q_years, "|2014|", "") != q_years AND replace(s.date_years, "|2014|", "") != s.date_years)
+        OR (replace(q_years, "|2016|", "") != q_years AND replace(s.date_years, "|2016|", "") != s.date_years)
+        OR (replace(q_years, "|2018|", "") != q_years AND replace(s.date_years, "|2018|", "") != s.date_years)
+        OR (replace(q_years, "|2020|", "") != q_years AND replace(s.date_years, "|2020|", "") != s.date_years)
+        OR (replace(q_years, "|2022|", "") != q_years AND replace(s.date_years, "|2022|", "") != s.date_years)
+        OR (replace(q_years, "|2024|", "") != q_years AND replace(s.date_years, "|2024|", "") != s.date_years))
+      AND
+      (q_months == "" OR s.date_months == "" OR replace(s.date_months, q_months, "") != s.date_months OR replace(q_months, s.date_months, "") != q_months
+        OR (replace(q_months, "|1|", "") != q_months AND replace(s.date_months, "|1|", "") != s.date_months)
+        OR (replace(q_months, "|2|", "") != q_months AND replace(s.date_months, "|2|", "") != s.date_months)
+        OR (replace(q_months, "|3|", "") != q_months AND replace(s.date_months, "|3|", "") != s.date_months)
+        OR (replace(q_months, "|4|", "") != q_months AND replace(s.date_months, "|4|", "") != s.date_months)
+        OR (replace(q_months, "|5|", "") != q_months AND replace(s.date_months, "|5|", "") != s.date_months)
+        OR (replace(q_months, "|6|", "") != q_months AND replace(s.date_months, "|6|", "") != s.date_months)
+        OR (replace(q_months, "|7|", "") != q_months AND replace(s.date_months, "|7|", "") != s.date_months)
+        OR (replace(q_months, "|8|", "") != q_months AND replace(s.date_months, "|8|", "") != s.date_months)
+        OR (replace(q_months, "|9|", "") != q_months AND replace(s.date_months, "|9|", "") != s.date_months)
+        OR (replace(q_months, "|10|", "") != q_months AND replace(s.date_months, "|10|", "") != s.date_months)
+        OR (replace(q_months, "|11|", "") != q_months AND replace(s.date_months, "|11|", "") != s.date_months)
+        OR (replace(q_months, "|12|", "") != q_months AND replace(s.date_months, "|12|", "") != s.date_months))
+      AND
+      (q_days == "" OR s.date_days == "" OR replace(s.date_days, q_days, "") != s.date_days OR replace(q_days, s.date_days, "") != q_days
+        OR (replace(q_days, "|1|", "") != q_days AND replace(s.date_days, "|1|", "") != s.date_days)
+        OR (replace(q_days, "|2|", "") != q_days AND replace(s.date_days, "|2|", "") != s.date_days)
+        OR (replace(q_days, "|3|", "") != q_days AND replace(s.date_days, "|3|", "") != s.date_days)
+        OR (replace(q_days, "|4|", "") != q_days AND replace(s.date_days, "|4|", "") != s.date_days)
+        OR (replace(q_days, "|5|", "") != q_days AND replace(s.date_days, "|5|", "") != s.date_days)
+        OR (replace(q_days, "|6|", "") != q_days AND replace(s.date_days, "|6|", "") != s.date_days)
+        OR (replace(q_days, "|7|", "") != q_days AND replace(s.date_days, "|7|", "") != s.date_days)
+        OR (replace(q_days, "|8|", "") != q_days AND replace(s.date_days, "|8|", "") != s.date_days)
+        OR (replace(q_days, "|9|", "") != q_days AND replace(s.date_days, "|9|", "") != s.date_days)
+        OR (replace(q_days, "|10|", "") != q_days AND replace(s.date_days, "|10|", "") != s.date_days)
+        OR (replace(q_days, "|11|", "") != q_days AND replace(s.date_days, "|11|", "") != s.date_days)
+        OR (replace(q_days, "|12|", "") != q_days AND replace(s.date_days, "|12|", "") != s.date_days)
+        OR (replace(q_days, "|13|", "") != q_days AND replace(s.date_days, "|13|", "") != s.date_days)
+        OR (replace(q_days, "|14|", "") != q_days AND replace(s.date_days, "|14|", "") != s.date_days)
+        OR (replace(q_days, "|15|", "") != q_days AND replace(s.date_days, "|15|", "") != s.date_days)
+        OR (replace(q_days, "|16|", "") != q_days AND replace(s.date_days, "|16|", "") != s.date_days)
+        OR (replace(q_days, "|17|", "") != q_days AND replace(s.date_days, "|17|", "") != s.date_days)
+        OR (replace(q_days, "|18|", "") != q_days AND replace(s.date_days, "|18|", "") != s.date_days)
+        OR (replace(q_days, "|19|", "") != q_days AND replace(s.date_days, "|19|", "") != s.date_days)
+        OR (replace(q_days, "|20|", "") != q_days AND replace(s.date_days, "|20|", "") != s.date_days)
+        OR (replace(q_days, "|21|", "") != q_days AND replace(s.date_days, "|21|", "") != s.date_days)
+        OR (replace(q_days, "|22|", "") != q_days AND replace(s.date_days, "|22|", "") != s.date_days)
+        OR (replace(q_days, "|23|", "") != q_days AND replace(s.date_days, "|23|", "") != s.date_days)
+        OR (replace(q_days, "|24|", "") != q_days AND replace(s.date_days, "|24|", "") != s.date_days)
+        OR (replace(q_days, "|25|", "") != q_days AND replace(s.date_days, "|25|", "") != s.date_days)
+        OR (replace(q_days, "|26|", "") != q_days AND replace(s.date_days, "|26|", "") != s.date_days)
+        OR (replace(q_days, "|27|", "") != q_days AND replace(s.date_days, "|27|", "") != s.date_days)
+        OR (replace(q_days, "|28|", "") != q_days AND replace(s.date_days, "|28|", "") != s.date_days)
+        OR (replace(q_days, "|29|", "") != q_days AND replace(s.date_days, "|29|", "") != s.date_days)
+        OR (replace(q_days, "|30|", "") != q_days AND replace(s.date_days, "|30|", "") != s.date_days)
+        OR (replace(q_days, "|31|", "") != q_days AND replace(s.date_days, "|31|", "") != s.date_days))
+    ACCUM
+      @@event_ids += s.id,
+      @@titles += s.title,
+      @@gold += s.gold_raw,
+      @@date_raw += s.date_raw,
+      @@date_years += s.date_years,
+      @@date_months += s.date_months,
+      @@date_days += s.date_days,
+      @@date_compact += s.date_compact,
+      @@venue_scores += s.@score;
+
+  PRINT @@event_ids AS event_ids, @@titles AS titles, @@gold AS gold,
+        @@date_raw AS date_raw, @@date_years AS date_years, @@date_months AS date_months,
+        @@date_days AS date_days, @@date_compact AS date_compact,
+        @@venue_scores AS venue_scores, @@best AS venue_best_score,
+        @@venue_hits.size() AS venue_hits, @@event_ids.size() AS date_overlap_hits;
+}
+
+INSTALL QUERY lookup_event, count_over_threshold, argmax_competitors, previous_event_gold, events_at_venue_date

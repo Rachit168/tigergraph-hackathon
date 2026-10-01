@@ -1,0 +1,86 @@
+// Loading jobs for OlympicGraph.
+// Primary production path is pyTigerGraph upsert from these same files (Savanna
+// cannot see the developer workstation filesystem). This job is for a local
+// TigerGraph CE instance when the export directory is visible to the server.
+//
+// Strategy: upsert by stable primary IDs. Re-running overwrites attributes
+// rather than duplicating vertices. Optional full reset is gsql/99_reset.gsql
+// followed by schema + load.
+//
+// Chunk files are JSONL because chunk text contains newlines.
+
+USE GRAPH OlympicGraph
+
+CREATE LOADING JOB load_olympic_vertices FOR GRAPH OlympicGraph {
+  DEFINE FILENAME file_document;
+  DEFINE FILENAME file_event;
+  DEFINE FILENAME file_games;
+  DEFINE FILENAME file_sport;
+  DEFINE FILENAME file_venue;
+  DEFINE FILENAME file_chunk;
+
+  LOAD file_document TO VERTEX Document VALUES (
+    $0, $1, $2, $3, $4, $5, $6 == "true", $7, $8, $9 == "true", $10
+  ) USING header="true", separator="\t";
+
+  LOAD file_event TO VERTEX Event VALUES (
+    $0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+    $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
+    $26, $27 == "true", $28, $29, $30 == "true", $31, $32, $33, $34, $35,
+    $36 == "true", $37, $38, $39, $40, $41, $42, $43 == "true"
+  ) USING header="true", separator="\t";
+
+  LOAD file_games TO VERTEX Games VALUES ($0, $1, $2)
+    USING header="true", separator="\t";
+
+  LOAD file_sport TO VERTEX Sport VALUES ($0, $1)
+    USING header="true", separator="\t";
+
+  LOAD file_venue TO VERTEX Venue VALUES ($0, $1, $2, $3)
+    USING header="true", separator="\t";
+
+  LOAD file_chunk TO VERTEX Chunk VALUES (
+    $."id", $."document_id", $."document_title", $."source_url", $."text",
+    $."indexed_text", $."start_char", $."end_char", $."token_count",
+    $."chunk_index", $."section", $."kind", $."event_id", $."document_kind",
+    $."embedding_status"
+  ) USING json_file="true";
+}
+
+CREATE LOADING JOB load_olympic_edges FOR GRAPH OlympicGraph {
+  DEFINE FILENAME file_contains;
+  DEFINE FILENAME file_describes;
+  DEFINE FILENAME file_in_games;
+  DEFINE FILENAME file_of_sport;
+  DEFINE FILENAME file_held_at;
+
+  LOAD file_contains TO EDGE CONTAINS_CHUNK VALUES ($0, $1, $2, $3, $4, $5)
+    USING header="true", separator="\t";
+
+  LOAD file_describes TO EDGE DESCRIBES VALUES ($0, $1, $2, $3)
+    USING header="true", separator="\t";
+
+  LOAD file_in_games TO EDGE IN_GAMES VALUES ($0, $1, $2, $3, $4, $5)
+    USING header="true", separator="\t";
+
+  LOAD file_of_sport TO EDGE OF_SPORT VALUES ($0, $1, $2, $3, $4)
+    USING header="true", separator="\t";
+
+  LOAD file_held_at TO EDGE HELD_AT VALUES ($0, $1, $2, $3, $4)
+    USING header="true", separator="\t";
+}
+
+// Example (local CE only):
+// RUN LOADING JOB load_olympic_vertices USING
+//   file_document="data/tigergraph/export/vertices_document.tsv",
+//   file_event="data/tigergraph/export/vertices_event.tsv",
+//   file_games="data/tigergraph/export/vertices_games.tsv",
+//   file_sport="data/tigergraph/export/vertices_sport.tsv",
+//   file_venue="data/tigergraph/export/vertices_venue.tsv",
+//   file_chunk="data/tigergraph/export/vertices_chunk.jsonl"
+// RUN LOADING JOB load_olympic_edges USING
+//   file_contains="data/tigergraph/export/edges_contains_chunk.tsv",
+//   file_describes="data/tigergraph/export/edges_describes.tsv",
+//   file_in_games="data/tigergraph/export/edges_in_games.tsv",
+//   file_of_sport="data/tigergraph/export/edges_of_sport.tsv",
+//   file_held_at="data/tigergraph/export/edges_held_at.tsv"
