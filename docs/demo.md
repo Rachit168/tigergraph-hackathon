@@ -136,8 +136,9 @@ follow-ups on 28 questions. Its one-point difference from Fixed GraphRAG is a
 measured result alongside bounded investigation, not proof that every extra
 step helps. These measurements describe this corpus and run.”
 
-**Notice:** Same `SemanticGenerator`, `dynamic/olympic-llm`, temperature 0,
-maximum completion tokens 1024. Structured retrieval supports the measured
+**Notice:** The three pipelines share the `SemanticGenerator` model
+configuration documented in the [public benchmark summary](public_benchmark.md).
+Structured retrieval supports the measured
 quality difference; the run does not establish universal superiority or a
 causal explanation for every corrected answer. p95 latencies are 30,681 /
 17,784 / 17,193 ms, if asked.

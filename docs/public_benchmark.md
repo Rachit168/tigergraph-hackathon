@@ -5,8 +5,10 @@ describes the measured behavior of the three production pipelines on 100
 visible public questions. It does not publish per-question answers, expected
 answers, gold document IDs, raw traces, or evaluator-only fields.
 
-All three pipelines used the same `SemanticGenerator` configuration: model
-`dynamic/olympic-llm`, temperature `0`, and maximum completion tokens `1024`.
+All three pipelines used the same `SemanticGenerator` configuration. The
+underlying LLM was `gpt-oss-120b`, accessed through OpenRouter via Cloudflare
+AI Gateway. `dynamic/olympic-llm` was the configured gateway/API model
+identifier. Temperature was `0`, and maximum completion tokens were `1024`.
 Evaluation is separate from retrieval and generation; evaluation-only
 reference data is never passed to a pipeline.
 
