@@ -8,6 +8,8 @@ from retrieval.agentic.tools import (
     EVENT_NEIGHBORHOOD,
     RETRIEVE_SPEC,
     SUPPORTING_CHUNKS,
+    VECTOR_SEARCH,
+    VECTOR_TOP_K,
     ToolAction,
 )
 
@@ -63,9 +65,10 @@ class BoundedPlanner:
         if terminal in {"not_found", "unresolved"}:
             return []
         actions: list[ToolAction] = []
-        qtype = state.spec.qtype
         if (
-            qtype == "multi_hop"
+            state.require_multihop_neighborhood
+            and state.slot("graph_relation") is not None
+            and state.slot("graph_relation").status != "resolved"
             and state.primary_status == "supported"
             and len(state.event_ids) == 1
             and not state.has_neighborhood
@@ -79,20 +82,25 @@ class BoundedPlanner:
                 )
             )
         if (
-            qtype == "multi_hop"
-            and state.primary_status == "supported"
+            state.primary_status == "supported"
             and state.event_ids
             and not state.has_chunks
+            and not state.chunks_attempted
         ):
             actions.append(
                 ToolAction(
                     tool=SUPPORTING_CHUNKS,
                     arguments={"event_ids": list(state.event_ids), "max_extra": 0},
-                    reason="unique multi-hop Event still needs provenance chunks",
+                    reason="retrieved Events still lack supporting provenance chunks",
                     parallel_group="repair",
                 )
             )
-        if state.primary_status == "ambiguous" and state.event_ids and not state.has_chunks:
+        if (
+            state.primary_status == "ambiguous"
+            and state.event_ids
+            and not state.has_chunks
+            and not state.chunks_attempted
+        ):
             actions.append(
                 ToolAction(
                     tool=SUPPORTING_CHUNKS,
@@ -102,17 +110,18 @@ class BoundedPlanner:
                 )
             )
         if (
-            qtype in {"lookup", "temporal", "superlative"}
-            and state.primary_status == "supported"
+            state.primary_status in {"supported", "ambiguous"}
             and state.event_ids
             and not state.has_chunks
-            and not state.answer_ready()
+            and state.chunks_attempted
+            and state.vector_search_available
+            and not state.vector_search_used
         ):
             actions.append(
                 ToolAction(
-                    tool=SUPPORTING_CHUNKS,
-                    arguments={"event_ids": list(state.event_ids), "max_extra": 0},
-                    reason="structured fact exists but source chunks were not retrieved yet",
+                    tool=VECTOR_SEARCH,
+                    arguments={"query": state.question, "top_k": VECTOR_TOP_K},
+                    reason="graph retrieval left a provenance gap after supporting chunks were unavailable; try one bounded vector fallback",
                     parallel_group="repair",
                 )
             )

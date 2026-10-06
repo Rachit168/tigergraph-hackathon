@@ -1,7 +1,7 @@
-# Phase 7: Bounded Agentic GraphRAG
+# Bounded Agentic GraphRAG
 
-Phase 7 adds a bounded adaptive orchestrator on top of the Phase 5
-`GraphRetriever` and the Phase 6 answering/citation layer. It does not change
+Agentic GraphRAG adds a bounded adaptive orchestrator on top of
+`GraphRetriever` and the Fixed GraphRAG answering/citation layer. It does not change
 the fixed GraphRAG pipeline.
 
 ## Flow
@@ -12,7 +12,7 @@ Question
   -> BoundedPlanner
   -> parallel GraphRetriever tools
   -> InvestigationState / slot ledger
-  -> at most 2 reactive follow-ups
+  -> at most 2 reactive follow-ups, including at most one vector fallback
   -> stop
   -> ContextPacker + Generator + fail-closed citations
 ```
@@ -27,6 +27,8 @@ Agentic GraphRAG:
 - follows up only when a gap remains
 - uses `event_neighborhood` for unique multi-hop hits because the venue/date
   answer still lacks typed relationship evidence
+- may use one bounded TigerGraph `vector_search` follow-up when provenance
+  remains missing and the vector capability is configured
 - keeps complete aggregation sets and ambiguous venue collisions
 
 Lookup, aggregation, superlative, and temporal questions stop after the
@@ -36,12 +38,14 @@ primary structured query when the required slots are already filled.
 
 `AgentBudget` caps iterations, tool calls, follow-ups, per-call extras, and
 observation size. Repeated `(tool, arguments)` fingerprints are rejected.
-The graph is never mutated.
+The graph is never mutated. Vector fallback is optional and fail-closed; if
+embedding configuration or the vector backend is unavailable, the Agentic
+pipeline continues without that tool.
 
 Stop reasons: `answered`, `ambiguous`, `unresolved`, `not_found`,
 `unsupported`, `budget_exhausted`, `no_progress`, `tool_failure`.
 
-## Intentionally not implemented
+## Intentionally outside this pipeline
 
 Planner/LLM loops, MCP, schema changes, communities, swarm agents, and any
-change to `FixedGraphRAGPipeline` or BM25.
+change to `FixedGraphRAGPipeline` or Basic RAG/BM25.

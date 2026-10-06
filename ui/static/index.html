@@ -83,8 +83,10 @@
               <span class="chip mute">Observed</span>
             </div>
             <div id="efficiency" class="metric-tiles"></div>
-            <div class="panel-h tight-top"><h2>Reliability</h2></div>
-            <div id="reliability" class="metric-tiles"></div>
+            <details class="reliability-details">
+              <summary>Reliability · attempts and failure diagnostics</summary>
+              <div id="reliability" class="metric-tiles"></div>
+            </details>
           </article>
         </section>
 
@@ -169,7 +171,7 @@
         </article>
         <article class="panel">
           <div class="panel-h"><h2>TigerGraph vector</h2></div>
-          <p class="banner mute">Verified infrastructure / experiment capability. Not the production RAG retriever.</p>
+          <p class="banner mute">Production-wired optional Agentic fallback; not the default RAG retriever.</p>
           <dl id="vector-status" class="metrics stacked"></dl>
           <div id="vector-exp"></div>
         </article>

@@ -19,6 +19,7 @@ const state = {
   pipeline: "agentic_graphrag",
   investigation: null,
   compare: null,
+  compareReplay: false,
   selectedEvidence: null,
   graph: { scale: 1, x: 0, y: 0 },
   busy: false,
@@ -42,15 +43,8 @@ async function boot() {
 
 function renderShell() {
   const caps = (state.bootstrap && state.bootstrap.capabilities) || {};
-  const mode = caps.mode === "live" ? "live" : "unavailable";
-  document.getElementById("top-caps").innerHTML = [
-    capPill("RAG", caps.rag),
-    capPill("Graph", caps.graphrag),
-    capPill(caps.generator === "semantic" ? "Semantic" : "Deterministic", caps.llm_configured || caps.generator === "deterministic"),
-    `<span class="chip ${mode}">${mode === "live" ? "LIVE" : "UNAVAILABLE"}</span>`,
-  ].join("");
-  document.getElementById("runtime-mode").textContent = mode === "live" ? "LIVE" : "UNAVAILABLE";
-  document.getElementById("runtime-mode").className = `chip ${mode}`;
+  renderTopCaps(caps, "unavailable", false);
+  setRuntimeMode("unavailable");
   const example = (state.bootstrap && state.bootstrap.example_placeholder) || "";
   document.getElementById("example-placeholder").textContent = example
     ? `Example shape (type your own question): ${example}`
@@ -59,6 +53,13 @@ function renderShell() {
     tab.addEventListener("click", () => showView(tab.dataset.view));
   });
   document.getElementById("run-btn").addEventListener("click", () => runCurrent());
+  document.querySelectorAll("input[name=pipeline]").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.checked && state.compare && currentQuestion() === String(state.compare.question || "").trim()) {
+        selectComparisonResult(radio.value);
+      }
+    });
+  });
   document.getElementById("cancel-btn").addEventListener("click", cancelRun);
   document.getElementById("clear-btn").addEventListener("click", clearWorkspace);
   document.getElementById("copy-btn").addEventListener("click", () => copyPayload(exportInvestigation()));
@@ -78,6 +79,23 @@ function renderShell() {
 
 function capPill(label, ok) {
   return `<span class="pill ${ok ? "ok" : "warn"}">${esc(label)} ${ok ? "ready" : "offline"}</span>`;
+}
+
+function renderTopCaps(caps, graphState, runtimeLive) {
+  const graphReady = graphState === "ready";
+  const graphLabel = graphState || (caps.tigergraph_configured ? "configured" : "offline");
+  document.getElementById("top-caps").innerHTML = [
+    capPill("RAG", caps.rag),
+    `<span class="pill ${graphReady ? "ok" : "warn"}">${esc("Graph")} ${esc(graphLabel)}</span>`,
+    capPill(caps.generator === "semantic" ? "Semantic" : "Deterministic", caps.llm_configured || caps.generator === "deterministic"),
+    `<span class="chip ${runtimeLive ? "live" : "unavailable"}">${runtimeLive ? "LIVE" : "UNAVAILABLE"}</span>`,
+  ].join("");
+}
+
+function setRuntimeMode(mode) {
+  const label = mode === "live" ? "LIVE" : mode === "preview" ? "PREVIEW" : mode.toUpperCase();
+  document.getElementById("runtime-mode").textContent = label;
+  document.getElementById("runtime-mode").className = `chip ${mode}`;
 }
 
 function selectedPipeline() {
@@ -141,10 +159,7 @@ function clearWorkspace() {
   state.selectedEvidence = null;
   document.getElementById("question-input").value = "";
   banner("", "");
-  const caps = (state.bootstrap && state.bootstrap.capabilities) || {};
-  const mode = caps.mode === "live" ? "live" : "unavailable";
-  document.getElementById("runtime-mode").textContent = mode === "live" ? "LIVE" : "UNAVAILABLE";
-  document.getElementById("runtime-mode").className = `chip ${mode}`;
+  setRuntimeMode("unavailable");
   renderInvestigate();
   renderCompare();
   renderReports();
@@ -204,6 +219,7 @@ async function runCompare(question) {
     });
     const payload = await res.json();
     state.compare = payload;
+    state.compareReplay = false;
     const preferred =
       (payload.results || []).find((row) => row.pipeline === "agentic_graphrag") || (payload.results || [])[0];
     if (preferred) applyInvestigation(preferred, { skipHistory: true });
@@ -230,8 +246,12 @@ async function runCompare(question) {
 }
 
 function applyInvestigation(payload, opts) {
-  state.investigation = payload;
+  const presented = opts && opts.replay
+    ? { ...payload, recorded: true, recorded_label: "SESSION REPLAY", runtime_mode: "preview", runtime_mode_label: "PREVIEW" }
+    : payload;
+  state.investigation = presented;
   state.selectedEvidence = null;
+  state.graph = { scale: 1, x: 0, y: 0 };
   renderInvestigate();
   renderReports();
   if (opts && opts.replay) {
@@ -239,12 +259,12 @@ function applyInvestigation(payload, opts) {
   }
   if (!opts || !opts.skipHistory) {
     remember({
-      question: payload.question,
-      pipeline: payload.pipeline,
-      status: payload.status,
-      status_label: payload.status_label,
-      latency_ms: payload.latency_ms,
-      investigation: payload,
+      question: presented.question,
+      pipeline: presented.pipeline,
+      status: presented.status,
+      status_label: presented.status_label,
+      latency_ms: presented.latency_ms,
+      investigation: presented,
     });
   }
 }
@@ -259,7 +279,7 @@ function banner(text, kind) {
 function renderInvestigate() {
   const inv = state.investigation;
   const empty = !inv;
-  document.getElementById("asked-question").textContent = empty ? "" : inv.question || "";
+  document.getElementById("asked-question").textContent = empty ? "" : `${pipelineLabel(inv.pipeline)} · ${inv.question || ""}`;
   const status = empty ? "" : inv.status || "";
   const statusEl = document.getElementById("answer-status");
   statusEl.textContent = empty ? "—" : inv.status_label || status || "—";
@@ -276,21 +296,7 @@ function renderInvestigate() {
   document.getElementById("step-count").textContent = `${((inv && inv.steps) || []).length} steps`;
   document.getElementById("timeline").innerHTML = empty
     ? `<li>Run an investigation to see observed steps.</li>`
-    : (inv.steps || [])
-        .map(
-          (step) => `<li class="${esc(step.kind || "")}">
-        <strong>Step ${step.index}</strong> · ${esc(step.kind)} · ${esc(step.action)}
-        <div>${esc(step.reason || "")}</div>
-        <div class="meta">
-          <span>${esc(step.status || "—")}</span>
-          <span>${fmtMs(step.elapsed_ms)}</span>
-          <span>${esc(step.result_summary || `${step.evidence_count || 0} evidence`)}</span>
-          <span>${esc(step.retrieval_method || "")}</span>
-        </div>
-        ${step.continued && step.why_next ? `<div class="next">Next step triggered: ${esc(step.why_next)}</div>` : ""}
-      </li>`
-        )
-        .join("") || emptyTrace(inv);
+    : (inv.steps || []).map(renderTraceStep).join("") || emptyTrace(inv);
   const cites = empty ? [] : inv.citations || [];
   document.getElementById("citations").innerHTML = cites.length
     ? cites
@@ -301,6 +307,7 @@ function renderInvestigate() {
     btn.addEventListener("click", () => {
       state.selectedEvidence = btn.dataset.eid;
       renderLineage();
+      renderGraph();
     });
   });
   renderEvidenceStatus(inv);
@@ -308,7 +315,7 @@ function renderInvestigate() {
   document.getElementById("continue-reason").textContent = continueCopy(inv, continueBits);
   document.getElementById("stop-reason").textContent = empty ? "—" : inv.stop_explanation || inv.stop_reason || stopFallback(inv);
   renderMetrics("efficiency", empty ? null : inv.efficiency, [
-    ["Tokens", (row) => (row.tokens_unknown ? "unknown" : row.tokens)],
+    ["Known tokens", (row) => row.tokens_unknown ? `${row.tokens} (partial)` : row.tokens],
     ["Model calls", (row) => row.model_calls],
     ["Tool calls", (row) => row.tool_calls],
     ["Steps", (row) => row.steps],
@@ -342,13 +349,23 @@ function renderEvidenceStatus(inv) {
     chip("Evidence retrieved", st.retrieved ?? 0),
     chip("Evidence used", st.used ?? 0),
     chip("Citations", st.citation_count ?? 0),
-    chip("Graph context", st.graph_present ? "present" : "not present"),
-    chip("Methods", (st.retrieval_methods || []).join(", ") || "none"),
+    chip(inv.pipeline === "rag" ? "Graph retrieval" : "Graph context", st.graph_present ? "present" : "not present"),
+    ...(inv.pipeline === "rag" && st.source_metadata_present ? [chip("Source metadata", "available")] : []),
+    `<span class="chip methods-status">Methods: ${renderMethods(st.retrieval_methods)}</span>`,
   ].join("");
 }
 
 function chip(label, value) {
   return `<span class="chip">${esc(label)}: ${esc(value)}</span>`;
+}
+
+function renderMethods(methods) {
+  const values = (methods || []).filter((method) => typeof method === "string" && method.trim());
+  if (!values.length) return '<span class="hint">—</span>';
+  return `<span class="method-chips" aria-label="Retrieval methods">${values.map((raw) => {
+    const label = raw.startsWith("gsql:") && !values.includes(raw.slice(5)) ? raw.slice(5) : raw;
+    return `<span class="method-chip" title="${esc(raw)}">${esc(label)}</span>`;
+  }).join("")}</span>`;
 }
 
 function renderMetrics(id, row, fields) {
@@ -360,7 +377,9 @@ function renderMetrics(id, row, fields) {
   node.innerHTML = fields
     .map(([label, fn]) => {
       const value = fn(row);
-      return `<div class="metric-tile"><span class="k">${esc(label)}</span><span class="v">${esc(displayMetric(value))}</span></div>`;
+      const rendered = id === "efficiency" && label === "Methods"
+        ? renderMethods(row.retrieval_methods) : esc(displayMetric(value));
+      return `<div class="metric-tile${id === "efficiency" && ["Known tokens", "Latency", "Tool calls", "Steps", "Model calls"].includes(label) ? " metric-primary" : ""}"><span class="k">${esc(label)}</span><span class="v">${rendered}</span></div>`;
     })
     .join("");
 }
@@ -414,6 +433,30 @@ function emptyTrace(inv) {
   return `<li>No observed retrieval or generation steps in this result.</li>`;
 }
 
+function diffEvidenceSummary(id, item = {}) {
+  // Fall back only to the repository's explicit typed evidence-ID segments.
+  const match = String(id).match(/(?:^|:)(entity|fact|edge|chunk|document):([^:]*)/);
+  const type = item.evidence_type && item.evidence_type !== "unknown" ? item.evidence_type : (match && match[1]);
+  const field = item.field_name || (match && ["fact", "edge"].includes(match[1]) ? match[2] : "");
+  const labels = { gold: "Gold medalist", gold_raw: "Gold medalist", nations: "Nations", competitors: "Competitors",
+    count: "Count", year: "Year", date_raw: "Date", HELD_AT: "Venue", IN_GAMES: "Games", OF_SPORT: "Sport" };
+  const categories = new Map([["entity", "Event"], ["fact", "Answer field"], ["edge", "Relation"], ["chunk", "Supporting chunk"], ["document", "Document"]]);
+  const label = Object.hasOwn(labels, field) ? labels[field] : categories.get(type) || "Evidence";
+  // ID-derived placeholder fields are not observed answer values.
+  const value = item.value != null && String(item.value) !== field ? String(item.value) : "";
+  return { label, value };
+}
+
+function renderDiffEvidence(ids, byId) {
+  if (!(ids || []).length) return '<p class="hint">none</p>';
+  return `<ul class="diff-items">${ids.map((id) => {
+    const item = diffEvidenceSummary(id, byId.get(id) || {});
+    return `<li title="${esc(id)}"><strong>${esc(item.label)}</strong>${item.value ? `<span>${esc(item.value)}</span>` : ""}</li>`;
+  }).join("")}</ul>
+    <details class="diff-identifiers"><summary>Evidence identifiers (${ids.length})</summary>
+      ${ids.map((id) => `<code>${esc(id)}</code>`).join("")}</details>`;
+}
+
 function renderDiff(inv) {
   const node = document.getElementById("evidence-diff");
   const diff = inv && inv.evidence_diff;
@@ -427,14 +470,17 @@ function renderDiff(inv) {
     node.innerHTML = `<p class="hint">${message}</p>`;
     return;
   }
+  const byId = new Map();
+  diff.steps.forEach((step) => (step.added_items || []).forEach((item) => byId.set(item.evidence_id, item)));
+  (inv.evidence || []).forEach((item) => byId.set(item.evidence_id, { ...byId.get(item.evidence_id), ...item }));
   node.innerHTML = diff.steps
     .map(
       (step) => `<article class="delta">
       <strong>After ${esc(step.tool || "tool")} · step ${step.index}</strong>
       <div class="hint">${esc(step.reason || "")}</div>
       <div class="cols">
-        <div><h3>Before</h3><p>${(step.before || []).map(esc).join("<br>") || "none"}</p></div>
-        <div><h3>New evidence</h3><p>${(step.added || []).map(esc).join("<br>") || "none"}</p></div>
+        <div><h3>Before</h3>${renderDiffEvidence(step.before, byId)}</div>
+        <div><h3>New evidence</h3>${renderDiffEvidence(step.added, byId)}</div>
         <div><h3>Resolved</h3><p>${(step.resolved || []).map(esc).join(", ") || "—"}</p></div>
         <div><h3>Remaining</h3><p>${(step.remaining || []).map(esc).join(", ") || "—"}</p></div>
       </div>
@@ -477,6 +523,62 @@ function renderLineage() {
     .join("");
 }
 
+
+function renderTraceStep(step) {
+  const kind = step.kind || "step";
+  const label = step.action === "vector_search" ? "Vector follow-up"
+    : ({ primary: "Initial retrieval", follow_up: "Follow-up retrieval", parse: "Interpret", generate: "Generation", stop: "Stop" }[kind] || kind);
+  return `<li class="trace-step" data-kind="${esc(kind)}">
+    <div class="trace-head"><span class="trace-number">STEP ${esc(step.index)}</span>
+      <strong>${esc(step.action || label)}</strong><span class="chip ${esc(step.status || "mute")}">${esc(step.status || "—")}</span></div>
+    <div class="trace-kind">${esc(label)}</div>
+    ${step.reason ? `<p class="trace-reason">${esc(step.reason)}</p>` : ""}
+    <div class="meta"><span>${fmtMs(step.elapsed_ms)}</span>
+      <span>${esc(step.result_summary || `${step.evidence_count || 0} evidence`)}</span>
+      ${step.retrieval_method ? `<span>${esc(step.retrieval_method)}</span>` : ""}</div>
+    ${step.continued && step.why_next ? `<div class="next">Next step triggered: ${esc(step.why_next)}</div>` : ""}
+  </li>`;
+}
+
+function vectorCheckStatus(vector, field) {
+  // Live booleans take precedence over bootstrap metadata. Missing is not ready.
+  if (vector[field] === true) return "PASS";
+  if (vector[field] === false && vector.attempted) return "NOT_READY";
+  if (vector.status === "UNAVAILABLE" || vector.status === "ERROR") return vector.status;
+  return "NOT_CHECKED";
+}
+
+function shortGraphLabel(value, limit = 18) {
+  const chars = Array.from(String(value || ""));
+  return chars.length > limit ? chars.slice(0, limit - 1).join("") + "…" : chars.join("");
+}
+
+function graphLabelIds(nodes, edges, selectedEvidence) {
+  const degree = new Map();
+  edges.forEach((edge) => [edge.source, edge.target].forEach((id) => degree.set(id, (degree.get(id) || 0) + 1)));
+  const dense = nodes.length > 18 || edges.length > 24;
+  const priority = [...nodes].sort((a, b) => {
+    const score = (node) => (node.evidence_id && node.evidence_id === selectedEvidence ? 1000 : 0)
+      + (["event", "venue", "games", "sport"].includes(node.kind) ? 100 : 0)
+      + (node.cited ? 20 : 0) + (degree.get(node.id) || 0);
+    return score(b) - score(a);
+  });
+  return new Set((dense ? priority.slice(0, 12) : priority).map((node) => node.id));
+}
+
+function familyBars(rows, series) {
+  const colors = ["#a6b5c7", "#3ee0c6", "#7aa2ff"];
+  return `<div class="family-chart" role="group" aria-label="Question-family accuracy">
+    <div class="family-legend">${series.map((name, i) => `<span style="--series:${colors[i]}">${esc(name)}</span>`).join("")}</div>
+    ${rows.map((row) => `<section class="family-group"><h3>${esc(row.label)}</h3>
+      ${row.values.map((value, i) => {
+        const width = Math.max(0, Math.min(100, Number(value) || 0));
+        return `<div class="family-row"><span>${esc(series[i])}</span><div class="family-track">
+          <span style="width:${width}%;background:${colors[i]}"></span></div>
+          <strong>${value != null ? esc(value) + "%" : "—"}</strong></div>`;
+      }).join("")}</section>`).join("")}</div>`;
+}
+
 function renderGraph() {
   const svg = document.getElementById("graph");
   const inv = state.investigation;
@@ -500,7 +602,11 @@ function renderGraph() {
     svg.innerHTML = `<text x="24" y="40" fill="#d98c4a">${inv.status === "error" ? "Graph data was not produced because the backend failed." : "Graph backend unavailable."}</text>`;
     return;
   }
-  note.textContent = graph.truncated ? `Showing ${nodes.length} of ${graph.node_count} nodes (${graph.edge_count} edges total).` : "";
+  note.textContent = [
+    inv.pipeline === "rag" ? "Source metadata from text evidence; no graph retrieval." : "",
+    graph.truncated ? `Showing ${nodes.length} of ${graph.node_count} nodes (${graph.edge_count} edges total).` : "",
+    "Hover or focus a node for its full name and identifier."
+  ].filter(Boolean).join(" ");
   if (!nodes.length) {
     svg.innerHTML = `<text x="24" y="40" fill="#8ea0b5">No graph evidence in this result.</text>`;
     return;
@@ -523,6 +629,9 @@ function renderGraph() {
     col += 1;
   });
   const byId = Object.fromEntries(positioned.map((node) => [node.id, node]));
+  const visibleLabels = graphLabelIds(nodes, edges, state.selectedEvidence);
+  svg.classList.toggle("dense", nodes.length > 18 || edges.length > 24);
+  svg.setAttribute("viewBox", `0 0 ${Math.max(920, ...positioned.map((node) => node.x + 90))} ${Math.max(520, ...positioned.map((node) => node.y + 65))}`);
   svg.innerHTML = `<g transform="translate(${state.graph.x} ${state.graph.y}) scale(${state.graph.scale})">
     ${edges
       .map((edge) => {
@@ -530,25 +639,38 @@ function renderGraph() {
         const b = byId[edge.target];
         if (!a || !b) return "";
         const cited = edge.evidence_id && edge.evidence_id === state.selectedEvidence;
-        return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${cited ? "#3ee0c6" : "#243041"}" stroke-width="${cited ? 2 : 1}" />
+        return `<g class="graph-edge${cited ? " connected" : ""}" data-source="${esc(edge.source)}" data-target="${esc(edge.target)}" data-eid="${esc(edge.evidence_id || "")}">
           <title>${esc(edge.label)}</title>
-          <text x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6}" fill="#8ea0b5" font-size="10">${esc(edge.label)}</text>`;
+          <line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" />
+          <text class="edge-label" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6}" font-size="10">${esc(shortGraphLabel(edge.label, 20))}</text></g>`;
       })
       .join("")}
     ${positioned
       .map((node) => {
-        const selected = node.evidence_id === state.selectedEvidence;
+        const selected = !!state.selectedEvidence && (node.evidence_id === state.selectedEvidence || node.id === state.selectedEvidence);
         const color = KIND_COLOR[node.kind] || "#8ea0b5";
-        const label = (node.label || node.id).slice(0, 28);
-        return `<g class="gnode" data-eid="${esc(node.evidence_id || "")}" data-id="${esc(node.id)}" style="cursor:pointer">
-          <title>${esc(node.label || node.id)}</title>
+        const label = shortGraphLabel(node.label || node.id);
+        const fullLabel = `${node.kind || "entity"} · ${node.label || node.id} · ${node.id}`;
+        return `<g class="gnode${selected ? " selected" : ""}" tabindex="0" role="button" aria-label="${esc(fullLabel)}" data-eid="${esc(node.evidence_id || "")}" data-id="${esc(node.id)}">
+          <title>${esc(fullLabel)}</title>
           <circle cx="${node.x}" cy="${node.y}" r="${selected || node.cited ? 16 : 12}" fill="${color}" stroke="${selected ? "#e7eef6" : "transparent"}" stroke-width="2" />
-          <text x="${node.x + 20}" y="${node.y + 4}" fill="#e7eef6" font-size="11">${esc(label)}</text>
+          <text class="node-label${visibleLabels.has(node.id) ? "" : " secondary-label"}" x="${node.x}" y="${node.y + 28}" text-anchor="middle" font-size="11">${esc(label)}</text>
         </g>`;
       })
       .join("")}
   </g>`;
   svg.querySelectorAll(".gnode").forEach((node) => {
+    const highlight = (active) => svg.querySelectorAll(".graph-edge").forEach((edge) => {
+      const selected = !!state.selectedEvidence && (edge.dataset.eid === state.selectedEvidence || [edge.dataset.source, edge.dataset.target].includes(state.selectedEvidence));
+      edge.classList.toggle("connected", selected || (active && [edge.dataset.source, edge.dataset.target].includes(node.dataset.id)));
+    });
+    node.addEventListener("pointerenter", () => highlight(true));
+    node.addEventListener("pointerleave", () => highlight(false));
+    node.addEventListener("focus", () => highlight(true));
+    node.addEventListener("blur", () => highlight(false));
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.dispatchEvent(new MouseEvent("click", { bubbles: true })); }
+    });
     node.addEventListener("click", (event) => {
       event.stopPropagation();
       state.selectedEvidence = node.dataset.eid || node.dataset.id;
@@ -591,6 +713,16 @@ function enablePanZoom(svg) {
   );
 }
 
+function selectComparisonResult(pipeline) {
+  const found = ((state.compare && state.compare.results) || []).find((item) => item.pipeline === pipeline);
+  if (!found) return false;
+  document.getElementById("question-input").value = found.question || state.compare.question || "";
+  const radio = document.querySelector(`input[name=pipeline][value="${found.pipeline}"]`);
+  if (radio) radio.checked = true;
+  applyInvestigation(found, { skipHistory: true, replay: state.compareReplay });
+  return true;
+}
+
 function renderCompare() {
   const table = document.getElementById("compare-table");
   const changed = document.getElementById("what-changed");
@@ -616,16 +748,13 @@ function renderCompare() {
         <td>${row.evidence_count}</td>
         <td>${row.model_calls}</td>
         <td>${row.tool_calls}</td>
-        <td>${esc((row.retrieval_methods || []).join(", ") || "—")}</td>
+        <td>${renderMethods(row.retrieval_methods)}</td>
       </tr>`
     )
     .join("")}</tbody></table>`;
   table.querySelectorAll(".compare-pick").forEach((row) => {
     row.addEventListener("click", () => {
-      const found = (state.compare.results || []).find((item) => item.pipeline === row.dataset.pipeline);
-      if (!found) return;
-      applyInvestigation(found, { skipHistory: true });
-      showView("investigate");
+      if (selectComparisonResult(row.dataset.pipeline)) showView("investigate");
     });
   });
   const facts = state.compare.what_changed || [];
@@ -695,7 +824,7 @@ function renderBenchmark() {
     order.map((id) => ({ label: bench.pipelines[id].name, value: bench.pipelines[id].correctness })),
     { unit: "%", max: 100 }
   );
-  document.getElementById("chart-family").innerHTML = groupedBars(
+  document.getElementById("chart-family").innerHTML = familyBars(
     bench.families.map((row) => ({
       label: `${row.label || row.id} (n=${row.n})`,
       values: [row.rag, row.graphrag, row.agentic_graphrag],
@@ -704,6 +833,11 @@ function renderBenchmark() {
   );
   if ((bench.unpublished_metrics || []).includes("tokens") || order.every((id) => bench.pipelines[id].tokens == null)) {
     document.getElementById("chart-tokens").innerHTML = `<p class="hint">${esc(bench.notes.tokens || "Token totals were not published for this public run.")}</p>`;
+  } else {
+    document.getElementById("chart-tokens").innerHTML = barChart(
+      order.map((id) => ({ label: bench.pipelines[id].name, value: bench.pipelines[id].tokens })),
+      { unit: "", title: "Known token totals" }
+    );
   }
   document.getElementById("chart-latency").innerHTML = groupedBars(
     order.map((id) => ({
@@ -727,17 +861,7 @@ function renderBenchmark() {
 function renderSystem() {
   const sys = state.bootstrap.system;
   const vector = sys.vector_status;
-  document.getElementById("vector-status").innerHTML = `
-    <dt>TigerGraph</dt><dd>${esc(sys.graph_status.product)}</dd>
-    <dt>Graph</dt><dd>${esc(sys.graph_status.graph)}</dd>
-    <dt>Version</dt><dd>${esc(sys.graph_status.version)}</dd>
-    <dt>Chunk embeddings</dt><dd>${Number(vector.chunk_embeddings_indexed).toLocaleString()} / ${Number(vector.chunk_embeddings_total).toLocaleString()}</dd>
-    <dt>Dimension</dt><dd>${vector.dimension}</dd>
-    <dt>Metric</dt><dd>${esc(vector.metric)}</dd>
-    <dt>Index</dt><dd>${esc(vector.index)}</dd>
-    <dt>Status</dt><dd>${esc(vector.status)}</dd>
-    <dt>Vector search</dt><dd>${esc(vector.search_query)}</dd>
-    <dt>Search status</dt><dd>${esc(vector.search_status)}</dd>`;
+  renderVectorStatus(vector, sys);
   document.getElementById("arch-notes").innerHTML = sys.architecture.notes.map((note) => `<li>${esc(note)}</li>`).join("");
   document.getElementById("why-disclaimer").textContent = sys.why_agentic.disclaimer;
   document.getElementById("why-rules").innerHTML = sys.why_agentic.rules
@@ -750,12 +874,52 @@ function renderSystem() {
   renderArchitecture(sys.architecture);
 }
 
+function renderVectorStatus(vector, sys) {
+  const indexed = Number(vector.chunk_embeddings_indexed);
+  const total = Number(vector.chunk_embeddings_total);
+  const counts = Number.isFinite(indexed) && Number.isFinite(total)
+    ? `${indexed.toLocaleString()} / ${total.toLocaleString()}`
+    : "Not published";
+  const countSource = vector.counts_source || "Counts are not verified by this health check.";
+  document.getElementById("vector-status").innerHTML = `
+    <dt>TigerGraph</dt><dd>${esc(sys.graph_status.product)}</dd>
+    <dt>Graph</dt><dd>${esc(sys.graph_status.graph)}</dd>
+    <dt>Version</dt><dd>${esc(sys.graph_status.version)}</dd>
+    <dt>Chunk embeddings</dt><dd>${esc(counts)}<div class="hint">${esc(countSource)}</div></dd>
+    <dt>Dimension</dt><dd>${vector.dimension}</dd>
+    <dt>Metric</dt><dd>${esc(vector.metric)}</dd>
+    <dt>Index</dt><dd>${esc(vector.index)}</dd>
+    <dt>Status</dt><dd>${esc(vector.status)}</dd>
+    <dt>Vector search</dt><dd>${esc(vector.search_query)}</dd>
+    <dt>Schema check</dt><dd>${esc(vectorCheckStatus(vector, "schema_ok"))}</dd>
+    <dt>Search status</dt><dd>${esc(vectorCheckStatus(vector, "search_query_ok"))}</dd>
+    <dt>Index check</dt><dd>${esc(vectorCheckStatus(vector, "index_ok"))}</dd>
+    ${vector.error ? `<dt>Diagnostic</dt><dd class="hint">${esc(vector.error)}</dd>` : ""}
+    <dt>Routing</dt><dd>${esc(vector.production_note || "Optional Agentic follow-up; not the default RAG retriever.")}</dd>`;
+}
+
 async function loadHealth() {
   const box = document.getElementById("health-checks");
   const overall = document.getElementById("health-overall");
   try {
     const res = await fetch("/api/health");
     const health = await res.json();
+    const caps = health.capabilities || {};
+    const graphReady = !!(
+      health.connection &&
+      health.connection.ok &&
+      health.schema_ok &&
+      health.queries_ok &&
+      health.retrieval_queries_ok
+    );
+    renderTopCaps(
+      caps,
+      graphReady ? "ready" : (health.connection && health.connection.ok ? "not_ready" : "unavailable"),
+      !!(caps.corpus || graphReady)
+    );
+    setRuntimeMode(caps.corpus || graphReady ? "live" : "unavailable");
+    const baseVector = (state.bootstrap && state.bootstrap.system && state.bootstrap.system.vector_status) || {};
+    renderVectorStatus({ ...baseVector, ...(health.vector || {}) }, state.bootstrap.system);
     overall.textContent = health.overall || "Read-only";
     overall.className = `pill ${health.overall === "PASS" ? "ok" : health.overall === "ERROR" ? "danger" : "warn"}`;
     box.innerHTML = (health.checks || [])
@@ -846,7 +1010,10 @@ function renderHistory() {
       }
       if (found.compare) {
         state.compare = found.compare;
+        state.compareReplay = true;
         renderCompare();
+      } else {
+        state.compareReplay = false;
       }
       if (found.investigation) applyInvestigation(found.investigation, { skipHistory: true, replay: true });
       showView("investigate");
@@ -934,15 +1101,15 @@ function barChart(rows, opts) {
   const width = 520;
   const height = 200;
   const max = opts.max || Math.max(...rows.map((row) => Number(row.value) || 0), 1);
-  return `<svg class="bar-chart" viewBox="0 0 ${width} ${height}">${rows
+  return `<svg class="bar-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(opts.title || "Pipeline comparison")}">${rows
     .map((row, index) => {
       const barWidth = 80;
       const gap = 40;
       const x = 40 + index * (barWidth + gap);
       const h = ((Number(row.value) || 0) / max) * 140;
-      return `<rect x="${x}" y="${160 - h}" width="${barWidth}" height="${h}" fill="${index === 1 ? "#3ee0c6" : index === 2 ? "#7aa2ff" : "#8ea0b5"}" />
+      return `<g><title>${esc(row.label)}: ${esc(row.value)}${esc(opts.unit || "")}</title><rect x="${x}" y="${160 - h}" width="${barWidth}" height="${h}" fill="${index === 1 ? "#3ee0c6" : index === 2 ? "#7aa2ff" : "#8ea0b5"}" />
         <text x="${x + barWidth / 2}" y="180" text-anchor="middle" fill="#8ea0b5" font-size="11">${esc(row.label)}</text>
-        <text x="${x + barWidth / 2}" y="${150 - h}" text-anchor="middle" fill="#e7eef6" font-size="12">${row.value}${opts.unit || ""}</text>`;
+        <text x="${x + barWidth / 2}" y="${150 - h}" text-anchor="middle" fill="#e7eef6" font-size="12">${esc(row.value)}${esc(opts.unit || "")}</text></g>`;
     })
     .join("")}</svg>`;
 }

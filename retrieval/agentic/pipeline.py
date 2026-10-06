@@ -40,6 +40,7 @@ class AgenticGraphRAGPipeline:
         budget: AgentBudget | None = None,
         planner: BoundedPlanner | None = None,
         require_multihop_neighborhood: bool = True,
+        vector_retriever=None,
     ) -> None:
         self.parser = parser
         self.retriever = retriever
@@ -48,7 +49,11 @@ class AgenticGraphRAGPipeline:
         self.budget = budget or AgentBudget()
         self.planner = planner or BoundedPlanner()
         self.require_multihop_neighborhood = require_multihop_neighborhood
-        self.executor = ToolExecutor(GraphRetrieverTools(retriever), self.budget)
+        self.vector_retriever = vector_retriever
+        self.executor = ToolExecutor(
+            GraphRetrieverTools(retriever, vector_retriever=vector_retriever),
+            self.budget,
+        )
 
     def run(self, question: str, qtype: str | None = None) -> AgentResult:
         total_started = time.perf_counter()
@@ -56,7 +61,10 @@ class AgenticGraphRAGPipeline:
         parsed = self.parser.parse(question, qtype=qtype)
         parsing_ms = (time.perf_counter() - parse_started) * 1000.0
 
-        state = InvestigationState.from_parsed(parsed)
+        state = InvestigationState.from_parsed(
+            parsed,
+            vector_search_available=self.vector_retriever is not None,
+        )
         state.require_multihop_neighborhood = self.require_multihop_neighborhood
         trace = AgentTrace(
             question=question,

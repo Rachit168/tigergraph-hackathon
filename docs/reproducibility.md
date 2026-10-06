@@ -16,12 +16,13 @@ python -m pip install -r requirements.txt
 `requirements.txt` lists:
 
 - **Production essentials:** `pyTigerGraph`, `python-dotenv`
-- **Optional vector experiments only:** `numpy`, `fastembed`
+- **Optional Agentic vector fallback:** `numpy`, `fastembed`
 
-The three-way public benchmark (BM25 RAG, fixed GraphRAG, BoundedPlanner Agentic)
-does **not** require FastEmbed or numpy. Those packages support the separate
-TigerGraph vector experiment path. Vector experiments also read the embedding
-client settings in `.env` (see `.env.example`).
+The three-way public benchmark (BM25 RAG, fixed GraphRAG, bounded evidence-state
+Agentic) can run without the optional local embedding packages. They enable the
+selective Agentic TigerGraph vector fallback. The fallback also reads the
+embedding client settings in `.env` (see `.env.example`) and does not replace
+BM25 retrieval.
 
 ## 2. Configure environment
 
@@ -47,26 +48,44 @@ Semantic generation (required to reproduce reported scores):
 Leave `LLM_PROVIDER=none` to keep the deterministic generator. That path will
 not match the published semantic percentages.
 
-Optional vector experiments:
+Optional Agentic vector fallback:
 
 - `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`
 
+To populate TigerGraph vectors from the configured corpus, with TigerGraph
+credentials and a usable embedding backend configured, run:
+
+```
+python -m scripts.ingest_chunk_vectors
+```
+
+This command performs vector schema/query setup and writes embeddings to the
+configured graph. Run it only when you intend to populate that graph. The
+fallback is available only after the vector capability is configured and
+populated; it remains optional for Agentic GraphRAG and is not the default RAG
+retriever.
+
 ## 3. Corpus (not in Git)
 
-Place the hackathon corpus at:
+The corpus is intentionally not committed to this repository. Obtain the
+public hackathon dataset from the [organizer's official Dataset folder](https://drive.google.com/drive/folders/10C0hzRaHlm00VYPFbjapKtWj0EPmLvQ9?usp=drive_link).
+From that dataset, place the required corpus file at:
 
 ```
 _research/hackathon-resources/corpus/corpus.jsonl
 ```
 
-The official public question file is in this snapshot at:
+This file is required for corpus-backed retrieval and reproducing the canonical
+public benchmark.
+
+The public evaluation questions are tracked in this repository at:
 
 ```
 _research/hackathon-resources/questions/eval_public.jsonl
 ```
 
-It is present in the public worktree and is the default input for
-`scripts.eval_three_way`. It has not been committed yet.
+They are the default input for `scripts.eval_three_way`. Private evaluation
+material is handled separately and is not included in this public repository.
 
 Without the corpus JSONL, corpus-backed tests skip. Graph evaluation still
 needs the same documents loaded into TigerGraph.
@@ -83,7 +102,9 @@ python -m scripts.verify_tigergraph
 `python -m scripts.verify_tigergraph` is **read-only**: it checks connectivity, schema, and installed queries, then writes JSON to `data/tigergraph/verify.json`. It does not reset, bind, upsert, or install GSQL. Use `ingest_tigergraph` for those steps. `--skip-live` checks the local export contract without connecting.
 
 `gsql/00_schema.gsql` … `04_retrieval.gsql` are the production schema, load, and
-queries. `gsql/05_vector.gsql` is the optional vector experiment install.
+queries. `gsql/05_vector.gsql` provides the TigerGraph vector schema/query used
+by the bounded Agentic fallback. Health and runtime retrieval paths do not
+install schema, install queries, upsert vectors, or rebuild indexes.
 Evaluation scripts are **read-only**: they do not reset or reinstall.
 
 Confirm:
@@ -109,8 +130,8 @@ and public cases in `test_parser_robustness`.
 ### Which tests need live TigerGraph
 
 Skip unless settings are configured: `test_tigergraph_live`,
-`test_graph_retrieval_live`, `test_phase6_live`, `test_phase7_live`.
-Those live tests are read-only against the graph.
+`test_graph_retrieval_live`, and the live Fixed GraphRAG / Agentic GraphRAG
+coverage. Those live tests are read-only against the graph.
 
 `tests/test_tigergraph_vector.py` is a **unit-test** module. It does not need a
 live graph or installed vector queries. The public unit-test run includes it
@@ -129,24 +150,28 @@ Needs: corpus, live graph with queries, semantic provider.
 python -m scripts.eval_three_way --generator semantic
 ```
 
-Default output: `_research/phase8_public_three_way/` (local, gitignored via
-`_research/phase*`).
+The public summary is [docs/public_benchmark.md](public_benchmark.md).
+Raw scored output is intentionally ignored under `data/final_public_benchmark/`
+because it contains evaluator-only fields. A fresh run writes local output
+under `_research/` (gitignored); it does not replace the public summary.
 
-`--generator deterministic` runs without an LLM and will not match the 67/98/97
+`--generator deterministic` runs without an LLM and will not match the 65/98/99
 semantic baseline.
 
-The published canonical number remains the Phase 10 semantic freeze. A new run
+The published canonical numbers remain the public benchmark (65 / 98 / 99). A new run
 is a reproduction check, not an automatic replacement of that table.
 
-## 7. Vector ablation (optional, not the production baseline)
+## 7. Vector A/B experiment (optional, not the production baseline)
 
 ```
 python -m scripts.eval_vector_ablation --generator semantic --skip-ingest
 python -m scripts.eval_temporal_vector_gate --generator semantic
 ```
 
-These scripts score public questions only. They do not change RAG/GraphRAG/Agentic
-production routing.
+These scripts score public questions only. They do not change Basic RAG, Fixed
+GraphRAG, or Agentic production routing. The canonical benchmark harness does
+not construct or pass a vector retriever; the optional fallback is not wired
+or exercised in that benchmark.
 
 ## 8. Parser robustness
 
@@ -160,7 +185,8 @@ python -m unittest tests.test_parser_robustness
 
 - `.env` and credentials
 - `corpus.jsonl`
-- `_research/phase*` result dumps
+- `_research/` result dumps
+- raw scored files under `data/final_public_benchmark/`
 - Private evaluation datasets
 
 ## 10. Ingest / export helpers

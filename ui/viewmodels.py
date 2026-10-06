@@ -73,7 +73,7 @@ def investigation_from_export(record: dict[str, Any] | None) -> dict[str, Any]:
         "evidence": evidence_views,
         "graph": graph,
         "stop_reason": stop_reason,
-        "stop_explanation": stop_explanation(stop_reason, pipeline, status),
+        "stop_explanation": stop_explanation(stop_reason, pipeline, status, failure_class),
         "continue_explanation": continue_explanation(agent_trace, pipeline),
         "why_continued": why_continued(agent_trace),
         "evidence_diff": evidence_diff(agent_trace, evidence_views),
@@ -361,17 +361,27 @@ def empty_investigation(*, question: str = "", pipeline: str = "rag") -> dict[st
 
 
 def status_label(status: str, failure_class: Any = None) -> str:
-    if str(failure_class or "").strip().casefold() == "timeout":
+    failure = str(failure_class or "").strip().casefold()
+    if failure == "timeout":
         return STATUS_LABELS["timeout"]
+    if failure == "malformed_output":
+        return STATUS_LABELS["generation_error"]
     key = str(status or "").strip().casefold()
     if key in STATUS_LABELS:
         return STATUS_LABELS[key]
     return str(status or "").replace("_", " ").upper() or "—"
 
 
-def stop_explanation(stop_reason: str | None, pipeline: str, status: str | None) -> str:
+def stop_explanation(
+    stop_reason: str | None,
+    pipeline: str,
+    status: str | None,
+    failure_class: Any = None,
+) -> str:
     key = str(status or "").strip().casefold()
     fail = str(stop_reason or "").strip().casefold()
+    if fail == "malformed_output" or str(failure_class or "").strip().casefold() == "malformed_output":
+        return "Investigation stopped because generation returned malformed output."
     if key in {"unavailable", "error", "timeout", "generation_error"}:
         return STOP_EXPLANATIONS.get(key, "Investigation stopped because the backend failed.")
     if fail == "timeout" or key == "timeout":
@@ -388,6 +398,9 @@ def stop_explanation(stop_reason: str | None, pipeline: str, status: str | None)
 
 
 def display_answer(view: dict[str, Any]) -> str:
+    failure = str(view.get("failure_class") or "").strip().casefold()
+    if failure == "malformed_output":
+        return "No answer was produced because generation returned malformed output."
     answer = str(view.get("answer") or "").strip()
     if answer:
         return answer
@@ -413,7 +426,12 @@ def refresh_status_fields(view: dict[str, Any]) -> dict[str, Any]:
     view["status_label"] = status_label(status, failure)
     view["runtime_mode"] = mode
     view["runtime_mode_label"] = RUNTIME_MODES.get(mode, mode.upper() if mode else "—")
-    view["stop_explanation"] = stop_explanation(view.get("stop_reason"), pipeline, status)
+    view["stop_explanation"] = stop_explanation(
+        view.get("stop_reason"),
+        pipeline,
+        status,
+        failure,
+    )
     view["answer_display"] = display_answer(view)
     view["reliability"] = reliability_panel(view, status, failure, list(view.get("attempts") or []))
     return view
@@ -425,7 +443,8 @@ def runtime_mode(status: str, *, recorded: bool = False, failure_class: Any = No
     key = str(status or "").strip().casefold()
     if key == "unavailable":
         return "unavailable"
-    if str(failure_class or "").strip().casefold() == "timeout" or key in {"error", "generation_error", "timeout"}:
+    failure = str(failure_class or "").strip().casefold()
+    if failure in {"timeout", "malformed_output"} or key in {"error", "generation_error", "timeout"}:
         return "error"
     if key:
         return "live"
@@ -566,7 +585,9 @@ def evidence_status(
         "retrieved": len(evidence),
         "used": len(citations),
         "citation_count": len(citations),
-        "graph_present": bool(graph_present),
+        # RAG source/chunk links are metadata, not evidence of graph retrieval.
+        "graph_present": bool(graph_present) and source.get("pipeline") != "rag",
+        "source_metadata_present": bool((graph or {}).get("nodes")) if source.get("pipeline") == "rag" else False,
         "retrieval_methods": list(source.get("retrieval_methods") or []),
     }
 
@@ -609,7 +630,7 @@ def reliability_panel(
         "tokens_unknown": bool(source.get("tokens_unknown")),
         "timeout": fail.casefold() == "timeout" or key == "timeout",
         "unavailable": key == "unavailable",
-        "malformed": key == "generation_error",
+        "malformed": key == "generation_error" or fail.casefold() == "malformed_output",
         "status": status or "",
         "status_label": status_label(status, failure_class),
     }
@@ -680,7 +701,10 @@ def what_changed(results: list[dict[str, Any]]) -> list[str]:
     graph_flags = []
     for item in results:
         present = bool((item.get("evidence_status") or {}).get("graph_present"))
-        graph_flags.append(f"{item.get('pipeline_label')}: {'graph context present' if present else 'no graph context'}")
+        if item.get("pipeline") == "rag":
+            graph_flags.append(f"{item.get('pipeline_label')}: text-only retrieval")
+        else:
+            graph_flags.append(f"{item.get('pipeline_label')}: {'graph context present' if present else 'no graph context'}")
     if graph_flags:
         lines.append("; ".join(graph_flags) + ".")
     return lines
@@ -719,7 +743,21 @@ def fixed_vs_agentic(results: list[dict[str, Any]]) -> dict[str, Any] | None:
 def health_checks(payload: dict[str, Any]) -> list[dict[str, str]]:
     caps = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
     conn = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
+    vector = payload.get("vector") if isinstance(payload.get("vector"), dict) else {}
     blockers = [str(item) for item in (payload.get("blockers") or []) if item]
+    vector_status = str(vector.get("status") or "").upper()
+    if vector_status == "READY" and vector.get("ok"):
+        vector_check_status = "PASS"
+        vector_detail = "TigerGraph vector schema, search query, and index are ready (read-only check)."
+    elif vector_status == "NOT_READY":
+        vector_check_status = "WARN"
+        vector_detail = str(vector.get("error") or "TigerGraph vector capability is configured but not ready.")
+    elif vector_status == "UNAVAILABLE":
+        vector_check_status = "UNAVAILABLE"
+        vector_detail = str(vector.get("error") or "TigerGraph vector capability is unavailable or not configured.")
+    else:
+        vector_check_status = "ERROR"
+        vector_detail = str(vector.get("error") or "TigerGraph vector capability status is unknown.")
     checks = [
         _check("runtime", "Application runtime", "PASS", "Console process is serving this health endpoint."),
         _check(
@@ -752,6 +790,7 @@ def health_checks(payload: dict[str, Any]) -> list[dict[str, str]]:
             "PASS" if payload.get("retrieval_queries_ok") else "UNAVAILABLE",
             "Retrieval queries verified." if payload.get("retrieval_queries_ok") else "Retrieval queries were not verified.",
         ),
+        _check("vector", "TigerGraph vector capability", vector_check_status, vector_detail),
         _check(
             "benchmark",
             "Published benchmark data",
@@ -801,6 +840,8 @@ def _judge_continue_text(reason: str) -> str:
     lowered = text.casefold()
     if "relational gap" in lowered or "held_at" in lowered or "in_games" in lowered:
         return "Initial evidence did not resolve the requested relationship, so a follow-up graph retrieval ran."
+    if "vector" in lowered:
+        return "Graph retrieval left a provenance gap, so one bounded TigerGraph vector fallback ran."
     if "provenance" in lowered or "source chunks" in lowered or "chunks were not retrieved" in lowered:
         return "A second retrieval was performed because an evidence slot for source documents remained unresolved."
     if "multiple candidates" in lowered or "collision" in lowered:
@@ -903,7 +944,7 @@ def _agent_panel(trace: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     follow_up_occurred = any(
         str(step.get("kind") or "") == "follow_up" for step in plan_steps
-    ) or any(name in {"event_neighborhood", "supporting_chunks"} for name in tool_names)
+    ) or any(name in {"event_neighborhood", "supporting_chunks", "vector_search"} for name in tool_names)
     return {
         "interpreted": interpreted,
         "strategy_changes": list(trace.get("strategy_changes") or []),
@@ -1016,7 +1057,7 @@ def _agent_steps(trace: dict[str, Any]) -> list[dict[str, Any]]:
         status = "ok" if item.get("success") else "error"
         if item.get("result_status"):
             status = str(item.get("result_status"))
-        kind = "follow_up" if item.get("tool") in {"event_neighborhood", "supporting_chunks"} or item.get("parallel_group") == "repair" else "primary"
+        kind = "follow_up" if item.get("tool") in {"event_neighborhood", "supporting_chunks", "vector_search"} or item.get("parallel_group") == "repair" else "primary"
         if index == 1:
             kind = "primary"
         nxt = observations[index] if index < len(observations) else None
@@ -1093,7 +1134,7 @@ def _architecture() -> dict[str, Any]:
             "                          +---+---+\n"
             "                              |\n"
             "                        TigerGraph\n"
-            "                    graph / relationships\n"
+            "                    graph / vector backend\n"
             "                              |\n"
             "                       grounded evidence\n"
             "                              |\n"
@@ -1108,7 +1149,7 @@ def _architecture() -> dict[str, Any]:
             {"id": "tigergraph", "label": "TigerGraph"},
             {"id": "evidence", "label": "grounded evidence"},
             {"id": "generator", "label": "shared SemanticGenerator"},
-            {"id": "vector", "label": "Vector (experiment)"},
+            {"id": "vector", "label": "Vector · Agentic fallback"},
         ],
         "edges": [
             {"from": "question", "to": "rag"},
@@ -1117,16 +1158,17 @@ def _architecture() -> dict[str, Any]:
             {"from": "parser", "to": "agentic"},
             {"from": "graphrag", "to": "tigergraph"},
             {"from": "agentic", "to": "tigergraph"},
+            {"from": "agentic", "to": "vector", "dashed": True, "note": "optional bounded fallback"},
             {"from": "tigergraph", "to": "evidence"},
             {"from": "rag", "to": "evidence", "note": "chunks only; no graph"},
             {"from": "evidence", "to": "generator"},
-            {"from": "vector", "to": "tigergraph", "dashed": True, "note": "experiment-only"},
+            {"from": "vector", "to": "tigergraph", "dashed": True, "note": "optional bounded fallback"},
         ],
         "notes": [
             "RAG does NOT use the graph.",
             "GraphRAG uses fixed graph retrieval.",
-            "Agentic adds adaptive follow-up investigation.",
-            "Vector is available experimentally.",
+            "Agentic adds evidence-state-driven follow-up investigation.",
+            "TigerGraph vector search is an optional bounded Agentic fallback, not the default RAG retriever.",
         ],
     }
 

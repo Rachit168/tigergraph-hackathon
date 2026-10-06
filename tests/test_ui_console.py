@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 from answering.models import Citation, PipelineTimings
 from evaluation.harness import HarnessResult, ThreeWayEvaluationHarness
@@ -16,8 +18,10 @@ from ui.runtime import ConsoleRuntime, investigation_from_result, reset_runtime_
 from ui.viewmodels import (
     empty_investigation,
     graph_from_evidence,
+    health_checks,
     investigation_from_export,
     record_is_submission_safe,
+    runtime_mode,
     status_label,
 )
 
@@ -177,12 +181,12 @@ class CanonicalMetricsTests(unittest.TestCase):
         self.assertEqual(bench["label"], "Published public benchmark")
         self.assertEqual(payload["label"], bench["label"])
         self.assertTrue(payload["replaceable"])
-        self.assertEqual(PIPELINES["rag"]["correctness"], 67.0)
+        self.assertEqual(PIPELINES["rag"]["correctness"], 65.0)
         self.assertEqual(PIPELINES["graphrag"]["correctness"], 98.0)
-        self.assertEqual(PIPELINES["agentic_graphrag"]["correctness"], 97.0)
-        self.assertEqual(payload["headline"]["rag"], 67.0)
+        self.assertEqual(PIPELINES["agentic_graphrag"]["correctness"], 99.0)
+        self.assertEqual(payload["headline"]["rag"], 65.0)
         self.assertEqual(payload["headline"]["graphrag"], 98.0)
-        self.assertEqual(payload["headline"]["agentic_graphrag"], 97.0)
+        self.assertEqual(payload["headline"]["agentic_graphrag"], 99.0)
         self.assertTrue(payload["vector_experiments_excluded"])
         self.assertIsNone(payload["pipelines"]["rag"]["completeness"])
         self.assertEqual(AGENT_BEHAVIOR["follow_ups"], 28)
@@ -195,9 +199,34 @@ class CanonicalMetricsTests(unittest.TestCase):
         for key, row in PIPELINES.items():
             self.assertEqual(bench["pipelines"][key]["correctness"], row["correctness"])
             self.assertEqual(bench["pipelines"][key]["exact"], row["exact"])
-            self.assertIsNone(bench["pipelines"][key]["tokens"])
+            self.assertIsNotNone(bench["pipelines"][key]["tokens"])
             self.assertIsNone(bench["pipelines"][key]["latency_p50_ms"])
-            self.assertIsNone(bench["pipelines"][key]["errors"])
+            self.assertIsNotNone(bench["pipelines"][key]["errors"])
+
+
+    def test_family_metrics_match_published_summary(self) -> None:
+        document = (UI_ROOT.parent / "docs" / "public_benchmark.md").read_text(encoding="utf-8")
+        section = document.split("## Question-family breakdown", 1)[1].split("## Agentic behavior", 1)[0]
+        published = {}
+        for line in section.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 5 or not cells[1].isdigit():
+                continue
+            family = cells[0].rsplit("/", 1)[-1].strip().casefold()
+            if family == "complete-set aggregation":
+                family = "aggregation"
+            family = family.replace("-", "_")
+            published[family] = (int(cells[1]), [float(value.rstrip("%")) for value in cells[2:]])
+        families = canonical_benchmark()["families"]
+        self.assertEqual(set(published), {row["id"] for row in families})
+        self.assertEqual(bootstrap()["benchmark"]["families"], families)
+        self.assertEqual(sum(row["n"] for row in families), canonical_benchmark()["n"])
+        for row in families:
+            with self.subTest(family=row["id"]):
+                self.assertEqual((row["n"], [row[key] for key in PIPELINES]), published[row["id"]])
+        for pipeline in PIPELINES:
+            correct = sum(round(row[pipeline] * row["n"] / 100) for row in families)
+            self.assertEqual(correct, PIPELINES[pipeline]["correctness"])
 
 
 class LiveRuntimeTests(unittest.TestCase):
@@ -218,6 +247,53 @@ class LiveRuntimeTests(unittest.TestCase):
         self.assertTrue(record_is_submission_safe(view["export_record"]))
         for key in EXCLUDED_KEYS:
             self.assertNotIn(key, view["export_record"])
+
+
+    def test_system_failure_is_redacted_in_investigation_and_export(self) -> None:
+        from unittest.mock import Mock
+
+        message = (
+            'https://private.example.invalid/api?token=URL_VALUE '
+            'api_key=KEY_VALUE token=TOKEN_VALUE Authorization: Bearer AUTH_VALUE; '
+            'password=PASSWORD_VALUE secret="SECRET VALUE"; '
+            'path="D:\\private folder\\config.txt" /srv/private/config.txt'
+        )
+        for pipeline in PIPELINES:
+            with self.subTest(pipeline=pipeline):
+                system = Mock(system_name=pipeline)
+                system.run.side_effect = ValueError(message)
+                runtime = ConsoleRuntime(harness=ThreeWayEvaluationHarness([system]))
+                view = runtime.investigate("An arbitrary public question", pipeline)
+                self.assertEqual(view["status"], "error")
+                self.assertEqual(view["answer"], "")
+                self.assertEqual(view["citations"], [])
+                self.assertIn("system_error:ValueError", view["errors"][0])
+                self.assertIn("operation=system_run", view["errors"][0])
+                self.assertTrue(record_is_submission_safe(view["export_record"]))
+                blob = json.dumps(view)
+                for value in ("private.example.invalid", "URL_VALUE", "KEY_VALUE", "TOKEN_VALUE",
+                              "AUTH_VALUE", "PASSWORD_VALUE", "SECRET VALUE", "private folder",
+                              "/srv/private/config.txt"):
+                    self.assertNotIn(value, blob)
+                self.assertEqual(view["export_record"]["errors"], view["errors"])
+
+    def test_runtime_initialization_and_health_errors_use_same_redaction(self) -> None:
+        from unittest.mock import Mock, patch
+        from ui.runtime import health_payload
+
+        message = "api_key=KEY_VALUE password=PASSWORD_VALUE token=TOKEN_VALUE"
+        runtime = ConsoleRuntime()
+        with patch.object(runtime, "_ensure_harness", side_effect=RuntimeError(message)):
+            view = runtime.investigate("An arbitrary public question", "rag")
+        self.assertEqual(view["status"], "unavailable")
+        with (
+            patch("ui.runtime.get_runtime", return_value=Mock(capabilities=lambda: {})),
+            patch("ui.runtime.run_verify", side_effect=RuntimeError(message)),
+        ):
+            health = health_payload()
+        for payload in (view, health):
+            for value in ("KEY_VALUE", "PASSWORD_VALUE", "TOKEN_VALUE"):
+                self.assertNotIn(value, json.dumps(payload))
 
     def test_compare_all_runs_three_pipelines(self) -> None:
         payload = self.runtime.compare("Who won?")
@@ -353,6 +429,29 @@ class TraceRenderingTests(unittest.TestCase):
         self.assertTrue(any(item["evidence_id"] for item in view["evidence"]))
         self.assertIn("Q1137721", view["event_ids"])
 
+    def test_rag_source_links_do_not_claim_graph_retrieval(self) -> None:
+        record = {
+            "schema_version": 1, "pipeline": "rag", "question": "q", "status": "answered",
+            "answer": "answer", "retrieval_methods": ["sparse"],
+            "evidence": [{"evidence_id": "c1", "evidence_type": "chunk", "chunk_id": "c1",
+                          "document_id": "doc1", "event_id": "Q1", "text": "source"}],
+        }
+        view = investigation_from_export(record)
+        self.assertTrue(view["graph"]["edges"])
+        self.assertTrue(view["evidence_status"]["source_metadata_present"])
+        self.assertFalse(view["evidence_status"]["graph_present"])
+        self.assertEqual(view["export_record"], record)
+        from ui.viewmodels import what_changed
+        self.assertIn("text-only retrieval", " ".join(what_changed([view])))
+
+    def test_fixed_graph_evidence_still_claims_graph_context(self) -> None:
+        view = investigation_from_export({
+            "schema_version": 1, "pipeline": "graphrag", "status": "answered",
+            "evidence": [{"evidence_id": "event1", "evidence_type": "entity", "event_id": "Q1"}],
+        })
+        self.assertTrue(view["evidence_status"]["graph_present"])
+        self.assertFalse(view["evidence_status"]["source_metadata_present"])
+
     def test_missing_evidence_does_not_crash(self) -> None:
         view = empty_investigation(question="?", pipeline="rag")
         self.assertEqual(view["evidence"], [])
@@ -382,6 +481,30 @@ class TraceRenderingTests(unittest.TestCase):
         self.assertEqual(view["stop_reason"], None)
         self.assertIsNone(view["agent"])
         self.assertEqual(view["steps"], [])
+
+    def test_malformed_generation_is_visible_as_failure(self) -> None:
+        view = investigation_from_export(
+            {
+                "schema_version": 1,
+                "question": "q",
+                "pipeline": "rag",
+                "answer": "",
+                "status": "generation_error",
+                "failure_class": "malformed_output",
+                "citations": [],
+                "evidence": [],
+                "total_tokens": 4,
+                "model_calls": 1,
+                "latency_ms": 10,
+            }
+        )
+        self.assertEqual(view["status_label"], "GENERATION ERROR")
+        self.assertEqual(view["runtime_mode"], "error")
+        self.assertIn("malformed output", view["answer_display"])
+        self.assertTrue(view["reliability"]["malformed"])
+
+    def test_recorded_mode_is_preview(self) -> None:
+        self.assertEqual(runtime_mode("answered", recorded=True), "preview")
 
     def test_timeout_status_label(self) -> None:
         self.assertEqual(status_label("generation_error", "timeout"), "TIMEOUT")
@@ -426,15 +549,144 @@ class TraceRenderingTests(unittest.TestCase):
 
 
 class VectorStatusTests(unittest.TestCase):
-    def test_vector_panel_uses_verified_static_values(self) -> None:
+    def test_vector_panel_uses_static_metadata_until_live_health_arrives(self) -> None:
         vector = bootstrap()["system"]["vector_status"]
         self.assertEqual(SYSTEM_STATUS["vector"], vector)
         self.assertEqual(vector["chunk_embeddings_indexed"], 28905)
-        self.assertFalse(vector["production"])
+        self.assertTrue(vector["production"])
+        self.assertEqual(vector["status"], "NOT_CHECKED")
+        self.assertIn("historical", vector["counts_source"])
+        self.assertIn("optional bounded tigergraph vector follow-up", bootstrap()["system"]["production_routing"]["vector"].casefold())
         self.assertEqual(bootstrap()["system"]["graph_status"]["graph"], "OlympicGraph")
+
+    def test_vector_health_check_states_are_truthful(self) -> None:
+        base = {"capabilities": {}, "connection": {"ok": True}, "blockers": []}
+        healthy = health_checks({
+            **base,
+            "vector": {
+                "status": "READY",
+                "ok": True,
+                "schema_ok": True,
+                "search_query_ok": True,
+                "index_ok": True,
+            },
+        })
+        self.assertEqual(next(item for item in healthy if item["id"] == "vector")["status"], "PASS")
+        failed = health_checks({
+            **base,
+            "vector": {
+                "status": "NOT_READY",
+                "ok": False,
+                "error": "search query is not installed",
+            },
+        })
+        vector_check = next(item for item in failed if item["id"] == "vector")
+        self.assertEqual(vector_check["status"], "WARN")
+        self.assertIn("not installed", vector_check["detail"])
+
+
+class LiveHarnessVectorWiringTests(unittest.TestCase):
+    def _build_harness(self, *, vector_fails: bool):
+        from unittest.mock import patch
+
+        import ui.runtime as runtime
+
+        class FakeClient:
+            def __init__(self, settings) -> None:
+                self.settings = settings
+
+            def connect(self) -> bool:
+                return True
+
+        class FakeGraphRetriever:
+            @classmethod
+            def from_client(cls, client):
+                return ("graph-retriever", client)
+
+        class RecordingAgenticPipeline:
+            instances = []
+
+            def __init__(self, *args, **kwargs) -> None:
+                self.args = args
+                self.kwargs = kwargs
+                type(self).instances.append(self)
+
+        class Harness:
+            def __init__(self, systems) -> None:
+                self.systems = systems
+
+        vector = object()
+
+        def build_vector(*args, **kwargs):
+            del args, kwargs
+            if vector_fails:
+                raise RuntimeError("embedding unavailable")
+            return vector
+
+        settings = SimpleNamespace(configured=True, graphname="OlympicGraph")
+        llm = SimpleNamespace(configured=False)
+        patches = [
+            patch.object(runtime, "load_settings", return_value=settings),
+            patch.object(runtime, "load_llm_settings", return_value=llm),
+            patch.object(runtime, "build_generator", return_value="generator"),
+            patch.object(runtime, "DEFAULT_CORPUS_PATH", SimpleNamespace(is_file=lambda: True)),
+            patch.object(runtime, "parse_corpus", return_value=SimpleNamespace(documents=["doc"])),
+            patch.object(runtime, "chunk_corpus", return_value=["chunk"]),
+            patch("evaluation.retrieval_gold.build_parser", return_value=("index", "question-parser")),
+            patch.object(runtime, "TigerGraphClient", FakeClient),
+            patch.object(runtime, "TextRetriever", return_value="sparse-retriever"),
+            patch.object(runtime, "GraphRAGQuestionParser", return_value="graph-parser"),
+            patch.object(runtime, "GraphRetriever", FakeGraphRetriever),
+            patch.object(runtime, "FixedGraphRAGPipeline", return_value="fixed-pipeline"),
+            patch.object(runtime, "RAGAdapter", side_effect=lambda *args, **kwargs: ("rag", args, kwargs)),
+            patch.object(runtime, "GraphRAGAdapter", side_effect=lambda *args, **kwargs: ("graph", args, kwargs)),
+            patch.object(runtime, "AgenticGraphRAGAdapter", side_effect=lambda *args, **kwargs: ("agentic", args, kwargs)),
+            patch.object(runtime, "AgenticGraphRAGPipeline", RecordingAgenticPipeline),
+            patch.object(runtime, "load_embedding_settings", return_value="embedding-settings"),
+            patch.object(runtime, "build_embedder", return_value=SimpleNamespace(dimension=384)),
+            patch.object(runtime, "TigerGraphVectorStore", return_value="vector-store"),
+            patch.object(runtime, "TigerGraphVectorRetriever", side_effect=build_vector),
+            patch("evaluation.harness.ThreeWayEvaluationHarness", Harness),
+        ]
+        with ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            harness = runtime.build_live_harness()
+        return harness, RecordingAgenticPipeline.instances[-1], vector
+
+    def test_agentic_receives_vector_retriever_when_construction_succeeds(self) -> None:
+        _harness, pipeline, vector = self._build_harness(vector_fails=False)
+        self.assertIs(pipeline.kwargs["vector_retriever"], vector)
+
+    def test_agentic_falls_back_to_no_vector_retriever(self) -> None:
+        _harness, pipeline, _vector = self._build_harness(vector_fails=True)
+        self.assertIsNone(pipeline.kwargs["vector_retriever"])
+class JavaScriptProcessTests(unittest.TestCase):
+    def test_rendering_tests_exit_without_stdin(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is not available")
+        result = subprocess.run(
+            [node, "tests/test_ui_rendering.js"], cwd=UI_ROOT.parent,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fail 0", result.stdout)
+        self.assertNotIn("process.exit(0)", (UI_ROOT.parent / "tests/test_ui_rendering.js").read_text(encoding="utf-8"))
 
 
 class PublicSafetyTests(unittest.TestCase):
+    def test_bootstrap_does_not_claim_live_before_health_probe(self) -> None:
+        self.assertEqual(bootstrap()["mode"], "unavailable")
+
+    def test_console_replay_forces_preview_presentation(self) -> None:
+        text = (UI_ROOT / "static" / "console.js").read_text(encoding="utf-8")
+        self.assertIn('recorded_label: "SESSION REPLAY"', text)
+        self.assertIn('runtime_mode: "preview"', text)
+
     def test_public_questions_are_pub_only_without_gold_fields(self) -> None:
         rows = public_questions()
         for row in rows:

@@ -9,6 +9,7 @@ from ingestion.models import TextChunk
 from retrieval.graph.vector import (
     VectorBackendError,
     VectorHit,
+    index_is_ready,
     map_vector_hits_to_chunks,
     parse_vector_attributes_from_ls,
     parse_vector_search_result,
@@ -74,6 +75,22 @@ class EmbeddingRequestTests(unittest.TestCase):
 
     def test_text_digest_is_stable(self) -> None:
         self.assertEqual(text_digest("  Judo   2016 "), text_digest("Judo 2016"))
+
+
+class VectorIndexReadinessTests(unittest.TestCase):
+    def test_readiness_requires_an_explicit_empty_rebuild_list(self) -> None:
+        cases = (
+            ({"NeedRebuildServers": []}, True),
+            ({"NeedRebuildServers": ["server1"]}, False),
+            ({"NeedRebuildServers": None}, False),
+            ({}, False),
+            (None, False),
+            ([], False),
+            ({"NeedRebuildServers": ()}, False),
+        )
+        for status, expected in cases:
+            with self.subTest(status=status):
+                self.assertIs(index_is_ready(status), expected)
 
 
 class VectorParseTests(unittest.TestCase):
@@ -288,6 +305,69 @@ class _IngestEmbedder:
 
 
 class SkipEnsureIngestTests(unittest.TestCase):
+    def test_read_only_health_probe_reports_ready_without_mutation(self) -> None:
+        from unittest.mock import patch
+
+        from retrieval.graph.verify import _verify_vector_read_only
+
+        with patch("retrieval.graph.verify.TigerGraphVectorStore", _RecordingStore):
+            result = _verify_vector_read_only(object())
+        self.assertEqual(result["status"], "READY")
+        self.assertTrue(result["schema_ok"])
+        self.assertTrue(result["search_query_ok"])
+        self.assertTrue(result["index_ok"])
+        self.assertEqual(_RecordingStore.last.calls, [
+            "require_schema",
+            "require_search_query",
+            "require_index",
+        ])
+        self.assertNotIn("ensure_schema", _RecordingStore.last.calls)
+        self.assertNotIn("ensure_search_query", _RecordingStore.last.calls)
+        self.assertNotIn("upsert_vectors", _RecordingStore.last.calls)
+        self.assertNotIn("wait_until_ready", _RecordingStore.last.calls)
+
+    def test_read_only_health_probe_reports_not_ready_on_check_failure(self) -> None:
+        from unittest.mock import patch
+
+        from retrieval.graph.verify import _verify_vector_read_only
+
+        with patch("retrieval.graph.verify.TigerGraphVectorStore", _MissingQueryStore):
+            result = _verify_vector_read_only(object())
+        self.assertEqual(result["status"], "NOT_READY")
+        self.assertTrue(result["schema_ok"])
+        self.assertFalse(result["search_query_ok"])
+        self.assertTrue(result["index_ok"])
+        self.assertIn("not installed", result["error"])
+        self.assertNotIn("ensure_schema", _RecordingStore.last.calls)
+        self.assertNotIn("ensure_search_query", _RecordingStore.last.calls)
+        self.assertNotIn("upsert_vectors", _RecordingStore.last.calls)
+        self.assertNotIn("wait_until_ready", _RecordingStore.last.calls)
+
+    def test_read_only_health_probe_redacts_sensitive_backend_errors(self) -> None:
+        from unittest.mock import patch
+
+        from retrieval.graph.verify import _verify_vector_read_only
+
+        class LeakyStore:
+            def __init__(self, client, *, dimension: int) -> None:
+                del client, dimension
+
+            def require_schema(self):
+                raise RuntimeError("https://user:password@example.invalid/api?token=SECRET")
+
+            def require_search_query(self):
+                raise RuntimeError("Authorization: Bearer SECRET")
+
+            def require_index(self):
+                raise RuntimeError("api_key=SECRET")
+
+        with patch("retrieval.graph.verify.TigerGraphVectorStore", LeakyStore):
+            result = _verify_vector_read_only(object())
+        self.assertEqual(result["status"], "NOT_READY")
+        self.assertNotIn("SECRET", result["error"])
+        self.assertNotIn("password", result["error"])
+        self.assertNotIn("example.invalid", result["error"])
+
     def test_default_ingest_still_ensures_schema_and_query(self) -> None:
         from unittest.mock import patch
 

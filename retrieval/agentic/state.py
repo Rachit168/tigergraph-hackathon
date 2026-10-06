@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from retrieval.graphrag.models import GraphEvidence, GraphRetrievalResult
 from retrieval.graphrag.parser import ParsedRetrievalRequest
+from retrieval.agentic.tools import VECTOR_SEARCH
 from retrieval.structured.models import QuerySpec
 
 SlotStatus = Literal["unknown", "searching", "resolved", "ambiguous", "unsupported"]
@@ -115,18 +116,30 @@ class InvestigationState:
     primary_reason: str | None = None
     primary_operation: str | None = None
     has_chunks: bool = False
+    chunks_attempted: bool = False
     has_neighborhood: bool = False
+    vector_search_available: bool = False
+    vector_search_used: bool = False
     last_error: str | None = None
     require_multihop_neighborhood: bool = True
 
     @classmethod
-    def from_parsed(cls, parsed: ParsedRetrievalRequest) -> InvestigationState:
+    def from_parsed(
+        cls,
+        parsed: ParsedRetrievalRequest,
+        *,
+        vector_search_available: bool = False,
+    ) -> InvestigationState:
+        unused_tools = {"retrieve_spec", "supporting_chunks", "event_neighborhood"}
+        if vector_search_available:
+            unused_tools.add(VECTOR_SEARCH)
         return cls(
             question=parsed.question,
             parsed=parsed,
             slots={slot.slot_id: slot for slot in slots_for_request(parsed)},
-            unused_tools={"retrieve_spec", "supporting_chunks", "event_neighborhood"},
+            unused_tools=unused_tools,
             primary_operation=parsed.spec.operation,
+            vector_search_available=vector_search_available,
         )
 
     @property
@@ -164,7 +177,8 @@ class InvestigationState:
             if result.chunks:
                 self.has_chunks = True
         elif tool_name == "supporting_chunks":
-            self.has_chunks = bool(result.chunks)
+            self.chunks_attempted = True
+            self.has_chunks = self.has_chunks or bool(result.chunks)
             self._attach_evidence("target_event", result)
         elif tool_name == "event_neighborhood":
             self.has_neighborhood = bool(result.edges or result.event_ids)
@@ -180,6 +194,11 @@ class InvestigationState:
                 elif result.status in {"not_found", "unresolved"}:
                     relation.status = "unsupported"
                 self._attach_evidence("graph_relation", result)
+        elif tool_name == VECTOR_SEARCH:
+            self.vector_search_used = True
+            self.has_chunks = self.has_chunks or bool(result.chunks)
+            self._attach_evidence("target_event", result)
+            self._attach_evidence("answer_field", result)
 
     def _apply_primary(self, result: GraphRetrievalResult) -> None:
         target = self.slot("target_event")
@@ -240,11 +259,10 @@ class InvestigationState:
     def answer_ready(self) -> bool:
         if self.primary_status != "supported":
             return False
-        if (
-            self.require_multihop_neighborhood
-            and self.spec.qtype == "multi_hop"
-            and not self.has_neighborhood
-        ):
+        relation = self.slot("graph_relation")
+        if self.require_multihop_neighborhood and relation is not None and relation.status != "resolved":
+            return False
+        if self.vector_search_available and self.chunks_attempted and not self.has_chunks and not self.vector_search_used:
             return False
         answer = self.slot("answer_field") or self.slot("complete_count") or self.slot("max_attribute")
         target = self.slot("target_event")
@@ -277,5 +295,8 @@ class InvestigationState:
             "tool_calls_used": self.tool_calls_used,
             "stop_reason": self.stop_reason,
             "has_chunks": self.has_chunks,
+            "chunks_attempted": self.chunks_attempted,
             "has_neighborhood": self.has_neighborhood,
+            "vector_search_available": self.vector_search_available,
+            "vector_search_used": self.vector_search_used,
         }

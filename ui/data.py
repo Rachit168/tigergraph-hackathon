@@ -37,12 +37,13 @@ def public_questions() -> list[dict[str, str]]:
 
 
 def bootstrap() -> dict[str, Any]:
+    capabilities = get_runtime().capabilities()
     return {
-        "mode": "live",
+        "mode": "unavailable",
         "pipelines": [{"id": key, "name": label} for key, label in PIPELINE_LABELS.items()],
         "benchmark": benchmark_view(),
         "system": system_view(),
-        "capabilities": get_runtime().capabilities(),
+        "capabilities": capabilities,
         "public_questions": public_questions(),
         "example_placeholder": example_placeholder(),
     }

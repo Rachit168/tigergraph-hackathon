@@ -510,7 +510,7 @@ class BenchmarkFairnessTests(unittest.TestCase):
             paths = write_benchmark_artifacts(payload, out)
             loaded = json.loads(paths["json"].read_text(encoding="utf-8"))
             self.assertEqual(loaded["run_id"], payload["run_id"])
-            self.assertIn("Phase 8", paths["report"].read_text(encoding="utf-8"))
+            self.assertIn("Public three-way benchmark", paths["report"].read_text(encoding="utf-8"))
             csv_text = paths["csv"].read_text(encoding="utf-8")
             self.assertIn("qid,qtype,system_name", csv_text)
         finally:

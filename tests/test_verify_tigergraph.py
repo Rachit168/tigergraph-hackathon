@@ -140,5 +140,93 @@ class RunVerifyReadOnlyTests(unittest.TestCase):
         self.assertFalse(report["load"]["attempted"])
 
 
+    def test_verify_diagnostics_are_redacted_in_report_and_health(self) -> None:
+        from retrieval.graph.client import GraphOperationError
+        from retrieval.graph.verify import run_verify
+        from ui.runtime import health_payload
+
+        message = (
+            'https://private.example.invalid/api?token=URL_VALUE '
+            'api_key=KEY_VALUE token=TOKEN_VALUE Authorization: Basic AUTH_VALUE; '
+            'password=PASSWORD_VALUE secret="SECRET VALUE"; '
+            'path="D:\\private folder\\config.txt" /srv/private/config.txt'
+        )
+        graph_error = GraphOperationError({
+            "exception_class": "BackendError", "operation": "schema",
+            "method": "verify_schema", "message": message, "response": message,
+        })
+        cases = (
+            ("connection_error", None),
+            ("connect", RuntimeError(message)),
+            ("verify_schema", graph_error),
+            ("verify_schema", ValueError(message)),
+            ("verify_queries", RuntimeError(message)),
+            ("verify_retrieval_queries", RuntimeError(message)),
+        )
+        for stage, error in cases:
+            with self.subTest(stage=stage, error_class=type(error).__name__):
+                client = Mock()
+                client.error = message if stage == "connection_error" else ""
+                client.environment = "test"
+                client.connect.return_value = stage != "connection_error"
+                client.verify_schema.return_value = {"ok": True}
+                client.verify_queries.return_value = {"ok": True}
+                client.verify_retrieval_queries.return_value = {"ok": True}
+                if error:
+                    getattr(client, stage).side_effect = error
+                settings = Mock(graphname="OlympicGraph", configured=False)
+                settings.redacted.return_value = {"host": "(set)"}
+                with (
+                    patch("retrieval.graph.verify.load_settings", return_value=settings),
+                    patch("retrieval.graph.verify.TigerGraphClient", return_value=client),
+                ):
+                    report = run_verify()
+                self.assertTrue(report["read_only"])
+                self.assertFalse(report["vector"]["ok"])
+                self.assertEqual(report["vector"]["status"], "UNAVAILABLE")
+                self.assertTrue(report["blockers"])
+                if isinstance(error, GraphOperationError):
+                    self.assertIn("BackendError", report["blockers"][0])
+                    self.assertIn("operation=schema", report["blockers"][0])
+                elif error:
+                    self.assertIn(type(error).__name__, report["blockers"][0])
+                with (
+                    patch("ui.runtime.get_runtime", return_value=Mock(capabilities=lambda: {})),
+                    patch("ui.runtime.run_verify", return_value=report),
+                    patch("ui.runtime.load_settings", return_value=settings),
+                ):
+                    health = health_payload()
+                for payload in (report, health):
+                    blob = json.dumps(payload)
+                    for value in ("private.example.invalid", "URL_VALUE", "KEY_VALUE", "TOKEN_VALUE",
+                                  "AUTH_VALUE", "PASSWORD_VALUE", "SECRET VALUE", "private folder",
+                                  "/srv/private/config.txt"):
+                        self.assertNotIn(value, blob)
+                for name in ("ensure_schema", "install_queries", "upsert_export", "probe_write"):
+                    getattr(client, name).assert_not_called()
+
+    def test_diagnostic_redaction_handles_quoted_credentials_and_local_paths(self) -> None:
+        from retrieval.graph.verify import _redact_diagnostic
+
+        cases = (
+            ('"api_key": "KEY VALUE"', "KEY VALUE"),
+            ("TG_API_TOKEN=TOKEN_VALUE", "TOKEN_VALUE"),
+            ("Authorization: Bearer AUTH_VALUE;", "AUTH_VALUE"),
+            ("Authorization: [REDACTED] AUTH_VALUE;", "AUTH_VALUE"),
+            ('"Authorization": "Basic AUTH VALUE"', "AUTH VALUE"),
+            ("password='PASSWORD VALUE'", "PASSWORD VALUE"),
+            ("secret=SECRET_VALUE", "SECRET_VALUE"),
+            (r"D:\private\config.txt", r"D:\private\config.txt"),
+            (r'"D:\private folder\config.txt"', "private folder"),
+            (r"\\server\private\config.txt", "server"),
+            ("/srv/private/config.txt", "/srv/private/config.txt"),
+            ("https://private.example.invalid/api", "private.example.invalid"),
+        )
+        for message, sensitive in cases:
+            with self.subTest(message=message):
+                self.assertNotIn(sensitive, _redact_diagnostic(message))
+        self.assertEqual(_redact_diagnostic("query missing; index not ready"), "query missing; index not ready")
+
+
 if __name__ == "__main__":
     unittest.main()

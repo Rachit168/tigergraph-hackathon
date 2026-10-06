@@ -7,20 +7,24 @@ from typing import Any
 
 from answering.factory import build_generator
 from answering.packer import ContextPacker
+from config.embeddings import load_embedding_settings
 from config.llm import load_llm_settings
 from config.settings import load_settings
 from evaluation.harness import AgenticGraphRAGAdapter, GraphRAGAdapter, HarnessResult, RAGAdapter
 from evaluation.trace_export import _strip_excluded, export_submission_record
 from ingestion.chunker import ChunkingConfig, chunk_corpus
+from ingestion.embeddings import build_embedder
 from ingestion.loader import parse_corpus
 from ingestion.paths import DEFAULT_CORPUS_PATH
 from retrieval.agentic.pipeline import AgenticGraphRAGPipeline
-from retrieval.graph.client import TigerGraphClient
-from retrieval.graph.verify import run_verify
+from retrieval.graph.client import TigerGraphClient, exception_details, format_operation_error
+from retrieval.graph.verify import _redact_diagnostic, run_verify
+from retrieval.graph.vector_store import TigerGraphVectorStore
 from retrieval.graphrag.parser import GraphRAGQuestionParser
 from retrieval.graphrag.pipeline import FixedGraphRAGPipeline
 from retrieval.graphrag.retriever import GraphRetriever
 from retrieval.rag.retriever import TextRetriever
+from retrieval.rag.vector import TigerGraphVectorRetriever
 from retrieval.structured.question import QuestionParser
 from ui.catalog import PIPELINE_LABELS, PIPELINE_ORDER
 from ui.viewmodels import (
@@ -64,7 +68,9 @@ class ConsoleRuntime:
             "graphrag": bool(tg.configured),
             "agentic_graphrag": bool(tg.configured),
             "read_only": True,
-            "mode": "live" if (corpus or tg.configured) else "unavailable",
+            # Configuration alone is not proof that a live pipeline is usable.
+            # The health probe or a completed investigation establishes LIVE.
+            "mode": "unavailable",
         }
 
     def investigate(self, question: str, pipeline: str) -> dict[str, Any]:
@@ -97,7 +103,7 @@ class ConsoleRuntime:
         try:
             harness = self._ensure_harness()
         except Exception as exc:
-            return _unavailable(question, pipeline, f"runtime_init:{exc.__class__.__name__}: {exc}")
+            return _unavailable(question, pipeline, f"runtime_init:{_safe_runtime_error(exc, 'runtime_init')}")
         system = harness.systems.get(pipeline)
         if system is None:
             return _unavailable(question, pipeline, f"pipeline_unavailable:{pipeline}")
@@ -113,7 +119,7 @@ class ConsoleRuntime:
                 retrieval_metadata={},
                 evidence_metadata=[],
                 status="error",
-                errors=[f"system_error:{exc.__class__.__name__}: {exc}"],
+                errors=[f"system_error:{_safe_runtime_error(exc, 'system_run')}"],
             )
             return investigation_from_result(failed)
         return investigation_from_result(result)
@@ -160,6 +166,7 @@ def build_live_harness():
     generator = build_generator("semantic" if llm.configured else "deterministic")
     question_parser = QuestionParser()
     systems: list[Any] = []
+    chunks = []
 
     if DEFAULT_CORPUS_PATH.is_file():
         corpus = parse_corpus(DEFAULT_CORPUS_PATH)
@@ -180,7 +187,29 @@ def build_live_harness():
         if client.connect():
             retriever = GraphRetriever.from_client(client)
             systems.append(GraphRAGAdapter(FixedGraphRAGPipeline(graph_parser, retriever, packer, generator)))
-            systems.append(AgenticGraphRAGAdapter(AgenticGraphRAGPipeline(graph_parser, retriever, packer, generator)))
+            vector_retriever = None
+            if chunks:
+                try:
+                    embedding_settings = load_embedding_settings(llm=llm)
+                    embedder = build_embedder(embedding_settings)
+                    vector_retriever = TigerGraphVectorRetriever(
+                        TigerGraphVectorStore(client, dimension=embedder.dimension),
+                        chunks,
+                        embedder,
+                    )
+                except Exception:
+                    vector_retriever = None
+            systems.append(
+                AgenticGraphRAGAdapter(
+                    AgenticGraphRAGPipeline(
+                        graph_parser,
+                        retriever,
+                        packer,
+                        generator,
+                        vector_retriever=vector_retriever,
+                    )
+                )
+            )
 
     if not systems:
         raise RuntimeError("no live pipelines available: corpus and/or TigerGraph are missing")
@@ -206,17 +235,40 @@ def health_payload() -> dict[str, Any]:
     try:
         verify = run_verify()
     except Exception as exc:
+        safe_error = _safe_runtime_error(exc, "health")
         verify = {
-            "connection": {"ok": False, "error": str(exc), "environment": "error"},
+            "connection": {"ok": False, "error": safe_error, "environment": "error"},
             "schema": {"ok": False},
             "queries": {"ok": False},
             "retrieval_queries": {"ok": False},
-            "blockers": [f"health_error:{exc.__class__.__name__}"],
+            "vector": {
+                "attempted": False,
+                "ok": False,
+                "status": "UNAVAILABLE",
+                "availability": "UNAVAILABLE",
+                "schema_ok": False,
+                "search_query_ok": False,
+                "index_ok": False,
+                "error": f"health_error:{safe_error}",
+            },
+            "blockers": [f"health_error:{safe_error}"],
         }
     connection = verify.get("connection") if isinstance(verify.get("connection"), dict) else {}
     schema = verify.get("schema") if isinstance(verify.get("schema"), dict) else {}
     queries = verify.get("queries") if isinstance(verify.get("queries"), dict) else {}
     retrieval = verify.get("retrieval_queries") if isinstance(verify.get("retrieval_queries"), dict) else {}
+    vector = verify.get("vector") if isinstance(verify.get("vector"), dict) else {}
+    if not vector:
+        vector = {
+            "attempted": False,
+            "ok": False,
+            "status": "UNAVAILABLE",
+            "availability": "UNAVAILABLE",
+            "schema_ok": False,
+            "search_query_ok": False,
+            "index_ok": False,
+            "error": "vector health was not checked",
+        }
     payload = {
         "read_only": True,
         "capabilities": caps,
@@ -228,6 +280,7 @@ def health_payload() -> dict[str, Any]:
         "schema_ok": bool(schema.get("ok")),
         "queries_ok": bool(queries.get("ok")),
         "retrieval_queries_ok": bool(retrieval.get("ok")),
+        "vector": vector,
         "blockers": list(verify.get("blockers") or []),
         "tigergraph": {
             "product": "TigerGraph",
@@ -260,6 +313,18 @@ def _health_overall(checks: list[dict[str, str]]) -> str:
     if "WARN" in states:
         return "WARN"
     return "PASS"
+
+
+def _safe_runtime_error(exc: Exception, operation: str) -> str:
+    safe_message = _redact_diagnostic(str(exc))
+    details = exception_details(
+        RuntimeError(safe_message),
+        operation=operation,
+        method="ui.runtime",
+    )
+    details["exception_class"] = exc.__class__.__name__
+    formatted = format_operation_error(details)
+    return _redact_diagnostic(formatted)[:1000]
 
 
 def _human_unavailable(pipeline: str, reason: str) -> str:

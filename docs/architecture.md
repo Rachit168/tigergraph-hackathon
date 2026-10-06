@@ -2,7 +2,8 @@
 
 This is the production system in this public snapshot. It does not implement
 the earlier planning document that described Entity/Alias/Community vertices
-or vector-seeded GraphRAG. Those layers are **not** the production path.
+or vector-seeded Fixed GraphRAG. The bounded Agentic pipeline does have a
+selective TigerGraph vector fallback.
 
 ## Shared pipeline
 
@@ -11,7 +12,7 @@ USER QUESTION
   → retrieval policy
         RAG:        BM25 (no QuestionParser)
         GraphRAG:   QuestionParser → one typed GSQL call
-        Agentic:    QuestionParser → BoundedPlanner
+        Agentic:    QuestionParser → evidence-state-driven BoundedPlanner
   → ContextPacker
   → shared SemanticGenerator
   → fail-closed citation / grounding validation
@@ -79,7 +80,7 @@ the answer after generation.
 ```
 question → parser → BoundedPlanner
         → retrieve_spec (include_chunks=False)
-        → optional event_neighborhood / supporting_chunks
+        → optional event_neighborhood / supporting_chunks / one vector_search
         → merge → pack_graph → SemanticGenerator → citations
 ```
 
@@ -87,38 +88,46 @@ Orchestration is deterministic: slot ledger + unused-tool classes + `AgentBudget
 (3 / 6 / 2). Repeated `(tool, arguments)` fingerprints are rejected. The graph
 is never mutated. This is not an LLM planner and not a multi-agent swarm.
 
-On the measured public set, extra hops did not improve accuracy versus Fixed
-GraphRAG (97% vs 98%).
+On the measured public set, the three systems recorded 65% Basic RAG, 98%
+Fixed GraphRAG, and 99% Agentic GraphRAG semantic accuracy. These are
+descriptive measurements for the stated corpus, question set, and model
+configuration, not guarantees.
 
-Tools: `retrieve_spec`, `supporting_chunks`, `event_neighborhood`.
+Tools: `retrieve_spec`, `supporting_chunks`, `event_neighborhood`, and one
+bounded `vector_search` fallback when the evidence state warrants it.
 
 ## TigerGraph role
 
 Installed queries in `gsql/00_schema.gsql` … `04_retrieval.gsql` implement the
 five operations plus chunk/neighborhood fetch. The graph stores Event vertices
 with typed attributes (sport, year, season, venue, date, competitors, nations,
-gold, prev/next). That is what makes complete-set aggregation, venue/date
+prev/next). That is what makes complete-set aggregation, venue/date
 collision detection, and temporal prev-year lookup possible. Chunks are
 supporting evidence, not the aggregation engine.
 
-## Why vector retrieval exists, but is not production RAG
+## Selective TigerGraph vector retrieval
 
-`gsql/05_vector.gsql` and the Python vector helpers are an **experiment-only**
-capability. They were verified live in the development environment. They are
-**not** installed by the standard production ingest path
-(`python -m scripts.ingest_tigergraph`), which applies `gsql/00_schema.gsql`
-through `04_retrieval.gsql` only.
+`gsql/05_vector.gsql` and the Python vector helpers provide a real TigerGraph
+vector backend. The live Agentic judge-console harness constructs the existing
+`TigerGraphVectorRetriever` when TigerGraph, the public corpus, and embedding
+configuration are available. Construction failure is fail-closed and leaves
+Agentic GraphRAG usable without vector fallback.
 
-Phase 13 measured three RAG-only variants; none of these is production routing:
+The production routing distinction is:
 
-- V0 = production BM25
-- V1 = TigerGraph vector search over Chunk embeddings
-- V2 = BM25 + vector hybrid
+- Basic RAG uses BM25 and does not use graph or vector retrieval.
+- Fixed GraphRAG uses one deterministic typed graph retrieval.
+- Agentic GraphRAG may use one bounded vector follow-up when its evidence state
+  leaves a provenance gap.
 
-Vector search can rank Chunk embeddings on `OlympicGraph` when the experiment
-schema/query is installed separately. It is **not** the production RAG
-retriever. GraphRAG and Agentic still use fixed typed GSQL. Hybrid/vector did
-not replace BM25 as the default `TextRetriever` method.
+The vector index uses BAAI/bge-small-en-v1.5 embeddings, dimension 384, and
+COSINE/HNSW. A live smoke test returned five real Chunk hits. The canonical
+public benchmark harness did not construct or pass a vector retriever, so its
+99% Agentic result is not attributable to vector retrieval.
+
+The separate vector A/B experiment measured BM25 66%, TigerGraph Vector alone
+53%, and BM25 + vector hybrid/RRF 65%. Those results support selective use,
+not global replacement of BM25.
 
 GRIP / MCP is **not** part of this public production runtime. The three
 pipelines talk to TigerGraph through pyTigerGraph / installed GSQL only.
@@ -135,7 +144,7 @@ cleared. Ambiguity and absence fail closed rather than guessing.
 | Surface | Path | Notes |
 |---|---|---|
 | Canonical public 100 | `scripts/eval_three_way.py` | Official public questions; gold used only in scoring |
-| Phase 13 vector ablation | `scripts/eval_vector_ablation.py` | Experiment-only; does not change production routing |
+| Vector retrieval experiment | `scripts/eval_vector_ablation.py` | Separate A/B measurement; does not change production routing |
 | Parser robustness | `tests/test_parser_robustness.py` | Closed-class paraphrases of public templates; no live graph |
 
 ## Submission-safe trace export
@@ -154,7 +163,7 @@ call this generic exporter; it must not copy scored benchmark rows as-is.
 ## Explicitly not production
 
 - Entity / Alias / Community vertices
-- Vector index / kNN as GraphRAG or as default RAG
+- Vector index / kNN as Fixed GraphRAG or as the default Basic RAG retriever
 - Dense RAG (stub only in production `TextRetriever`)
 - LLM planner / swarm / MCP / GRIP runtime
 - Graph mutation by the agent

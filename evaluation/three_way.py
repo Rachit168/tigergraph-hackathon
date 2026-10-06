@@ -149,7 +149,7 @@ def render_report(payload: dict[str, Any]) -> str:
     overall = summary["overall"]
     lines: list[str] = []
     add = lines.append
-    add("# Phase 8: Public three-way benchmark")
+    add("# Public three-way benchmark")
     add("")
     add("Diagnostic comparison of RAG, Fixed GraphRAG, and Agentic GraphRAG on the 100 public questions.")
     add("This report does not declare a single winner.")

@@ -155,10 +155,10 @@ def map_vector_hits_to_chunks(hits: list[VectorHit], chunks_by_id: dict[str, Any
 
 
 def index_is_ready(status: Any) -> bool:
-    if not isinstance(status, dict):
+    if not isinstance(status, dict) or "NeedRebuildServers" not in status:
         return False
-    pending = status.get("NeedRebuildServers")
-    return pending == [] or pending is None
+    pending = status["NeedRebuildServers"]
+    return type(pending) is list and not pending
 
 
 def _as_list(value: Any) -> list[Any]:

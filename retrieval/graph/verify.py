@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
 
+from config.embeddings import load_embedding_settings
 from config.settings import load_settings
 from ingestion.chunker import chunk_corpus
 from ingestion.graph_export import export_graph
@@ -28,6 +30,8 @@ from retrieval.graph.client import (
     repo_gsql_queries,
 )
 from retrieval.graph.contract import GraphStore, compare_solver_to_graph
+from retrieval.graph.vector import SEARCH_QUERY
+from retrieval.graph.vector_store import TigerGraphVectorStore
 from retrieval.structured.index import StructuredIndex
 from retrieval.structured.solver import StructuredSolver
 
@@ -104,18 +108,29 @@ def run_verify() -> dict[str, Any]:
         "schema": {"attempted": False, "ok": False},
         "queries": {"attempted": False, "ok": False, "names": list(INSTALLED_QUERIES)},
         "retrieval_queries": {"attempted": False, "ok": False},
+        "vector": _vector_unavailable("not_checked"),
         "load": {"attempted": False, "ok": False},
         "read_only": True,
         "blockers": [],
     }
-    connected = client.connect()
+    try:
+        connected = client.connect()
+    except Exception as exc:
+        error = _safe_verify_error(exc)
+        report["connection"]["error"] = error
+        report["blockers"].append(error)
+        report["vector"] = _vector_unavailable(error)
+        return report
+    connection_error = _redact_diagnostic(client.error or "")
     report["connection"] = {
         "ok": connected,
-        "error": client.error,
+        "error": connection_error,
         "environment": client.environment,
     }
     if not connected:
-        report["blockers"].append(client.error or "TigerGraph is not reachable")
+        error = connection_error or "TigerGraph is not reachable"
+        report["blockers"].append(error)
+        report["vector"] = _vector_unavailable(error)
         return report
     try:
         report["schema"]["attempted"] = True
@@ -139,12 +154,119 @@ def run_verify() -> dict[str, Any]:
         if not retrieval.get("ok"):
             missing = ",".join(retrieval.get("missing") or [])
             report["blockers"].append(f"required retrieval queries missing REST endpoints: {missing}")
-    except GraphOperationError as exc:
-        report["blockers"].append(str(exc))
+        report["vector"] = _verify_vector_read_only(client)
     except Exception as exc:
-        details = exception_details(exc, operation="verify", method="run_verify")
-        report["blockers"].append(format_operation_error(details))
+        error = _safe_verify_error(exc)
+        report["blockers"].append(error)
+        report["vector"] = _vector_unavailable(error)
     return report
+
+
+def _vector_unavailable(error: str) -> dict[str, Any]:
+    dimension = load_embedding_settings().dimension
+    return {
+        "attempted": False,
+        "ok": False,
+        "status": "UNAVAILABLE",
+        "availability": "UNAVAILABLE",
+        "schema_ok": False,
+        "search_query_ok": False,
+        "index_ok": False,
+        "search_query": SEARCH_QUERY,
+        "dimension": dimension,
+        "error": _redact_diagnostic(error),
+    }
+
+
+def _verify_vector_read_only(client: TigerGraphClient) -> dict[str, Any]:
+    """Probe vector readiness without schema, query, index, or data mutation."""
+
+    dimension = load_embedding_settings().dimension
+    result: dict[str, Any] = {
+        "attempted": True,
+        "ok": False,
+        "status": "NOT_READY",
+        "availability": "UNAVAILABLE",
+        "schema_ok": False,
+        "search_query_ok": False,
+        "index_ok": False,
+        "search_query": SEARCH_QUERY,
+        "dimension": dimension,
+        "error": "",
+    }
+    store = TigerGraphVectorStore(client, dimension=dimension)
+    errors: list[str] = []
+    try:
+        schema = store.require_schema()
+        result["schema_ok"] = True
+        spec = schema.get("spec") if isinstance(schema, dict) else None
+        if isinstance(spec, dict):
+            result["dimension"] = spec.get("dimension") or dimension
+            result["metric"] = spec.get("metric")
+            result["index"] = spec.get("index_type")
+    except Exception as exc:
+        errors.append(_safe_vector_error("schema", exc))
+    try:
+        store.require_search_query()
+        result["search_query_ok"] = True
+    except Exception as exc:
+        errors.append(_safe_vector_error("query", exc))
+    try:
+        index = store.require_index()
+        result["index_ok"] = True
+        if isinstance(index, dict):
+            result["index_status"] = index.get("status")
+    except Exception as exc:
+        errors.append(_safe_vector_error("index", exc))
+    if result["schema_ok"] and result["search_query_ok"] and result["index_ok"]:
+        result["ok"] = True
+        result["status"] = "READY"
+        result["availability"] = "AVAILABLE"
+    result["error"] = "; ".join(errors)
+    return result
+
+
+def _safe_vector_error(stage: str, exc: Exception) -> str:
+    safe_message = _redact_diagnostic(str(exc))
+    details = exception_details(
+        RuntimeError(safe_message),
+        operation=f"vector_{stage}",
+        method=f"TigerGraphVectorStore.require_{stage}",
+    )
+    formatted = format_operation_error(details)
+    return _redact_diagnostic(formatted)[:1000]
+
+
+def _safe_verify_error(exc: Exception) -> str:
+    if isinstance(exc, GraphOperationError):
+        # Preserve structured operation/class context without forwarding raw details.
+        return _redact_diagnostic(format_operation_error(exc.details))[:1000]
+    details = exception_details(
+        RuntimeError(_redact_diagnostic(str(exc))), operation="verify", method="run_verify"
+    )
+    details["exception_class"] = exc.__class__.__name__
+    return _redact_diagnostic(format_operation_error(details))[:1000]
+
+
+def _redact_diagnostic(text: str) -> str:
+    """Keep diagnostic context while removing endpoint, credential and path values."""
+    redacted = re.sub(r"""https?://[^\s\'"\\]+""", "[REDACTED_URL]", text or "")
+    redacted = re.sub(
+        r"""(?i)(\b(?:[\w-]*[_-])?(?:api[_-]?key|token|password|passwd|secret)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+        r"\1[REDACTED]",
+        redacted,
+    )
+    redacted = re.sub(
+        r"""(?i)(\bauthorization\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:(?:Bearer|Basic|\[REDACTED\])\s+(?![\w-]+\s*[:=]))?[^\s,;]+)""",
+        r"\1[REDACTED]",
+        redacted,
+    )
+    redacted = re.sub(r"(?i)(\bbearer\s+)[^\s,;]+", r"\1[REDACTED]", redacted)
+    return re.sub(
+        r"""(?i)(?:"(?:[a-z]:[\\/]|\\\\|/)[^"]*"|'(?:[a-z]:[\\/]|\\\\|/)[^']*'|\b[a-z]:[\\/][^\s,;'"]+|\\\\[^\s,;'"]+|(?<![\w:])/(?:[^\s,;'"]+))""",
+        "[REDACTED_PATH]",
+        redacted,
+    )
 
 
 def run_probe_write(cleanup: bool = True) -> dict[str, Any]:

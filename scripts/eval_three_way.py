@@ -1,4 +1,4 @@
-"""Run the Phase 8 public three-way benchmark.
+"""Run the public three-way benchmark.
 
 Usage:
     python -m scripts.eval_three_way
@@ -35,7 +35,7 @@ from retrieval.rag.retriever import TextRetriever
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Phase 8 public three-way benchmark")
+    parser = argparse.ArgumentParser(description="Public three-way benchmark")
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_PATH)
     parser.add_argument("--questions", type=Path, default=DEFAULT_PUBLIC_QUESTIONS_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)

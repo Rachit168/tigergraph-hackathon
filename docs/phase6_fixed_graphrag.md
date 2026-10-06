@@ -1,7 +1,7 @@
-# Phase 6: Fixed GraphRAG Pipeline
+# Fixed GraphRAG pipeline
 
-Phase 6 adds a synchronous answer pipeline and a common evaluation boundary on
-top of the Phase 5 graph retrieval contract. It does not add an agent.
+Fixed GraphRAG adds a synchronous answer pipeline and a common evaluation boundary on
+top of the graph retrieval contract. It does not add an agent.
 
 ## Fixed flow
 
@@ -40,7 +40,7 @@ extraction. Installed-query mapping remains in
 ## Evidence and context
 
 `ContextPacker.pack_graph` orders entity, fact, edge, and chunk evidence and
-deduplicates only identical `evidence_id` values. Every Phase 5 provenance
+deduplicates only identical `evidence_id` values. Every graph provenance
 field is retained, including null fields. Complete-set retrieval has no
 top-k packing limit; every returned Event entity and the complete `event_ids`
 list remain present.
@@ -51,10 +51,10 @@ changing BM25.
 
 ## Generation and citations
 
-`Generator` is a provider-neutral synchronous protocol. Phase 6 supplies
-`DeterministicGroundedGenerator`, which renders only explicit structured graph
-facts. It does not infer answers from prose chunks, so text-only RAG requires a
-future injected generator to produce semantic answers.
+`Generator` is a provider-neutral synchronous protocol. The live three-way
+harness supplies the shared `SemanticGenerator` to this pipeline (or the
+deterministic generator when no provider is configured). Fixed GraphRAG packs
+typed graph facts and supporting chunks; citation validation remains fail-closed.
 
 A citation identifies a packed `evidence_id` and exposes its source URL, source
 date, document, chunk, and Event IDs where available. Citation validation is
@@ -72,7 +72,7 @@ timings.
 
 An ambiguous, unresolved, unsupported, or missing retrieval result is passed
 to the generator but cannot become a definitive answer. The pipeline enforces
-Phase 5 `answer_suppressed` semantics after generation, keeps all candidate
+graph retrieval `answer_suppressed` semantics after generation, keeps all candidate
 entities in the retrieval result, and discards unsupported generated output.
 
 ## Three-way evaluation boundary
@@ -82,8 +82,7 @@ result schema:
 
 - `RAGAdapter` uses the existing `TextRetriever`;
 - `GraphRAGAdapter` uses `FixedGraphRAGPipeline`;
-- `AgenticGraphRAGPlaceholder` returns an explicit `not_implemented` result
-  and makes zero retrieval calls.
+- `AgenticGraphRAGAdapter` wraps the bounded live Agentic pipeline separately.
 
 `ThreeWayEvaluationHarness` applies the same question and optional `qtype` to
 each selected adapter. It does not inspect public gold answers during pipeline
@@ -91,7 +90,6 @@ execution.
 
 ## Intentionally deferred
 
-Phase 6 does not include LLM provider configuration, agentic planning,
-tool-selection loops, follow-up retrieval, iterative refinement, MCP, vector
-retrieval, or communities. The Agentic adapter exists only to stabilize the
-comparison interface for the later Agentic phase.
+This pipeline does not include agentic planning, tool-selection loops,
+follow-up retrieval, iterative refinement, MCP, vector retrieval, or
+communities. The separate Agentic pipeline owns those behaviors.

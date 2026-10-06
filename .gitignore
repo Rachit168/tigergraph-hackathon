@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 data/tigergraph/export/
 data/tigergraph/verify.json
+data/final_public_benchmark/
 *.log
 _private/
 **/hidden50/
