@@ -1,9 +1,13 @@
 # Public benchmark
 
-This is a sanitized summary of the final public semantic benchmark. It
-describes the measured behavior of the three production pipelines on 100
-visible public questions. It does not publish per-question answers, expected
-answers, gold document IDs, raw traces, or evaluator-only fields.
+This is a sanitized summary of the public semantic benchmark. It describes the
+measured behavior of the three production pipelines on 100 visible public
+questions. This summary does not publish per-question scored answers, expected
+answers, gold document IDs, raw traces, or evaluator-only fields. The separate
+Round 1 Hidden-50 system-output artifact at
+[`results/hidden50_results.jsonl`](../results/hidden50_results.jsonl) contains
+the question texts and generated pipeline outputs, but no evaluator reference
+answers or scoring fields.
 
 All three pipelines used the same `SemanticGenerator` configuration. The
 underlying LLM was `gpt-oss-120b`, accessed through OpenRouter via Cloudflare
@@ -96,9 +100,10 @@ artifacts under `data/final_public_benchmark/` are intentionally ignored and
 must remain untracked because they contain evaluator-only fields. The public
 repository contains this sanitized summary instead.
 
-Hidden evaluation is handled as a separate evaluator-side process. Hidden
-questions and reference data are not stored in this public repository, are not
-used by the live console, and are not described or reconstructed here.
+The Hidden-50 output file is provided for organizer inspection. Its question
+text and generated system outputs are separate from the public benchmark and
+are not used by the live console. Evaluator reference answers and scoring data
+remain outside this public repository; no Hidden-50 accuracy is claimed.
 
 ## Limitations
 

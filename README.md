@@ -71,8 +71,13 @@ Corpus JSONL is **not** in Git. Place it at
 `_research/hackathon-resources/corpus/corpus.jsonl`.
 The public evaluation questions are tracked in this repository at
 `_research/hackathon-resources/questions/eval_public.jsonl` and are the default
-benchmark input. Private evaluation material is handled separately and is not
-included in this public repository.
+benchmark input. Evaluator reference answers and scoring fields remain
+private.
+
+For Round 1 inspection, [the separate Hidden-50 output artifact](results/hidden50_results.jsonl)
+contains the 50 question texts and generated outputs from all three pipelines,
+including statuses, usage, and Agentic traces. It excludes evaluator reference
+answers and scoring fields; no hidden accuracy is claimed.
 
 Without TigerGraph or the LLM provider, unit tests still run; live graph tests
 skip, and semantic evaluation cannot reproduce the reported numbers.

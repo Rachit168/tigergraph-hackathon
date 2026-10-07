@@ -2,8 +2,9 @@
 
 How a fresh clone becomes a running three-way system. No secrets belong in Git.
 
-This public snapshot only documents **public** data and the three production
-pipelines. It does not instruct a clone to load private evaluation files.
+This public snapshot documents the three production pipelines and the released
+system-output artifacts. It does not instruct a clone to load private
+evaluator reference files.
 
 ## 1. Install
 
@@ -84,8 +85,11 @@ The public evaluation questions are tracked in this repository at:
 _research/hackathon-resources/questions/eval_public.jsonl
 ```
 
-They are the default input for `scripts.eval_three_way`. Private evaluation
-material is handled separately and is not included in this public repository.
+They are the default input for `scripts.eval_three_way`. A separate
+Round 1 output file, [`results/hidden50_results.jsonl`](../results/hidden50_results.jsonl),
+contains the 50 question texts and generated outputs for organizer inspection;
+evaluator reference answers and scoring fields remain private and are not
+included in this repository.
 
 Without the corpus JSONL, corpus-backed tests skip. Graph evaluation still
 needs the same documents loaded into TigerGraph.
@@ -187,7 +191,7 @@ python -m unittest tests.test_parser_robustness
 - `corpus.jsonl`
 - `_research/` result dumps
 - raw scored files under `data/final_public_benchmark/`
-- Private evaluation datasets
+- Private evaluator reference answers and scoring labels
 
 ## 10. Ingest / export helpers
 
